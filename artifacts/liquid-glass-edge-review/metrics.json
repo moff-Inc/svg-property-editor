@@ -1,0 +1,168 @@
+{
+  "metrics": [
+    {
+      "name": "committed",
+      "bg": "#ffffff",
+      "sectors": [
+        2099313,
+        2120069,
+        1964845,
+        2132557,
+        2088828,
+        2033700,
+        2055839
+      ],
+      "cv": 0.025945719463445944,
+      "topLeft": 1942256
+    },
+    {
+      "name": "handoff",
+      "bg": "#ffffff",
+      "sectors": [
+        2430899,
+        2442041,
+        2390706,
+        2429571,
+        2450507,
+        2401209,
+        2433939
+      ],
+      "cv": 0.00826989316667221,
+      "topLeft": 2274158
+    },
+    {
+      "name": "current",
+      "bg": "#ffffff",
+      "sectors": [
+        2426806,
+        2433751,
+        2384062,
+        2423864,
+        2444178,
+        2394181,
+        2428194
+      ],
+      "cv": 0.008350176225702275,
+      "topLeft": 2268591
+    },
+    {
+      "name": "committed",
+      "bg": "#1b1e22",
+      "sectors": [
+        1978686,
+        1993038,
+        1923057,
+        1991874,
+        1983173,
+        1949635,
+        1972120
+      ],
+      "cv": 0.011950679308520019,
+      "topLeft": 1863816
+    },
+    {
+      "name": "handoff",
+      "bg": "#1b1e22",
+      "sectors": [
+        2116733,
+        2129244,
+        2100661,
+        2116851,
+        2134425,
+        2104368,
+        2130139
+      ],
+      "cv": 0.005716586187605131,
+      "topLeft": 2003512
+    },
+    {
+      "name": "current",
+      "bg": "#1b1e22",
+      "sectors": [
+        2116369,
+        2127643,
+        2099469,
+        2115650,
+        2132977,
+        2102601,
+        2129087
+      ],
+      "cv": 0.005723173514830516,
+      "topLeft": 2002521
+    }
+  ],
+  "checks": [
+    {
+      "name": "loop 1",
+      "pass": true,
+      "mean": 0,
+      "max": 0
+    },
+    {
+      "name": "loop 2",
+      "pass": true,
+      "mean": 0,
+      "max": 0
+    },
+    {
+      "name": "loop 3",
+      "pass": true,
+      "mean": 0.0005015432098765432,
+      "max": 5
+    },
+    {
+      "name": "loop 4",
+      "pass": true,
+      "mean": 0.00031684027777777776,
+      "max": 6
+    },
+    {
+      "name": "effects off gradient",
+      "pass": true,
+      "mean": 0,
+      "max": 0
+    },
+    {
+      "name": "effects off solid",
+      "pass": true,
+      "mean": 0,
+      "max": 0
+    },
+    {
+      "name": "effects off blob",
+      "pass": true,
+      "mean": 0,
+      "max": 0
+    },
+    {
+      "name": "blur visible #ffffff",
+      "pass": true,
+      "mean": 5.608616898148148,
+      "max": 114
+    },
+    {
+      "name": "blur visible #1b1e22",
+      "pass": true,
+      "mean": 4.748144290123457,
+      "max": 122
+    },
+    {
+      "name": "SVG parity transparent=0",
+      "pass": true,
+      "mean": 0.32980848524305556,
+      "max": 25
+    },
+    {
+      "name": "SVG parity transparent=1",
+      "pass": true,
+      "mean": 1.4653643120659723,
+      "max": 255
+    },
+    {
+      "name": "intro end",
+      "pass": true,
+      "mean": 0,
+      "max": 0
+    }
+  ]
+}
