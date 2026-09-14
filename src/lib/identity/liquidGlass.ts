@@ -130,14 +130,56 @@ interface Dot {
 
 // グラデーション配色（Image #8）: 内側(inner=dotColor2)→外側(outer=dotColor)を
 // リング半径 sr で補間する。中心付近ティール／外周バイオレット、中間はその混色。
-function gradientRgb(sr: number, inner: number[], outer: number[], P: LiquidGlassParams): number[] {
+// 濃度均一化: 明るい内側(ティール)の知覚輝度を外側(バイオレット)へ GRAD_LUMA_EVEN 分だけ
+// 寄せる。RGB 等倍スケール＝色相・彩度(R:G:B比)は不変・明度のみ低下（k≤1 で増光/クリップなし）。
+// 基準を luma(outer) にするのでパレット差替でも自動追従。solid/blob は本関数を通らず不変。
+const GRAD_LUMA_EVEN = 0.85; // 0=無補償 … 1=内外を等輝度化（inner/outer≈1.0）
+const luma601 = (c: number[]) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+// 背景明度ゲート: 黒(0)で前段式にバイト一致・白(1)で白背景向け補償をフル適用（両背景で成立）。
+const bgWhiteness = (P: LiquidGlassParams) => clamp((luma601(rgbOf(P.bg)) / 255 - 0.5) / 0.5, 0, 1);
+// 白背景の濃度均一化: 高i(=帯中心=各辺の濃い芯)ほど色を白へ寄せ、overlap で暗くなりすぎる
+// 飽和天井(≈255-luma)を下げて芯の突出を抑える。色/luma 領域の補償なので motion2 の shade
+// (alpha 再増幅)に相殺されない＝白地の主レバー。黒背景は bgWhiteness=0 で完全に無効。
+const CORE_LIFT_WHITE = 0.15; // 0=無効 … 白地で芯を白へ寄せる強度（推奨0.08–0.20。過大で芯が白抜け）
+function gradientRgb(sr: number, i: number, inner: number[], outer: number[], P: LiquidGlassParams): number[] {
   const t = smoothstep(P.ringR - 0.28, P.ringR + 0.28, sr);
-  return [
+  const col = [
     inner[0] + (outer[0] - inner[0]) * t,
     inner[1] + (outer[1] - inner[1]) * t,
     inner[2] + (outer[2] - inner[2]) * t,
   ];
+  const L0 = luma601(col);
+  let out = col;
+  if (L0 > 1) {
+    const k = Math.min(1, (L0 * (1 - GRAD_LUMA_EVEN) + luma601(outer) * GRAD_LUMA_EVEN) / L0);
+    out = [col[0] * k, col[1] * k, col[2] * k];
+  }
+  const lift = CORE_LIFT_WHITE * bgWhiteness(P) * clamp(i, 0, 1);
+  return lift > 0
+    ? [out[0] + (255 - out[0]) * lift, out[1] + (255 - out[1]) * lift, out[2] + (255 - out[2]) * lift]
+    : out;
 }
+
+// per-dot 径係数(coverage)。gradient は白背景で floor を上げ faint を拡大し薄い辺を充填。
+// ピーク径(i=1)は 1.10 に固定＝各辺の芯サイズ・凝集は不変。黒背景は floor=0.66 で前段式にバイト一致。
+function gradRadiusFactor(i: number, P: LiquidGlassParams): number {
+  const s = Math.sqrt(i);
+  if (P.dotSource !== "gradient") return 0.35 + 0.75 * s;
+  const floor = 0.66 + (0.7 - 0.66) * bgWhiteness(P);
+  return floor + (1.1 - floor) * s;
+}
+
+// 濃度均一化(gradient): alpha に入る強度を per-dot で写像。
+// - faint(i→0) は floor で下限リフト（黒背景で黒沈み緩和・前段）。
+// - dense(i→1) は白背景のみ ceil<1 で頭打ち（芯の過度な暗さを抑制。初期はほぼ無効＝色lift優先）。
+// 黒背景は ceil=1.0 で前段式にバイト一致。solid/blob はゲートで raw i を返し完全不変。3経路が同一式。
+const GRAD_ALPHA_FLOOR = 0.15; // faint 下限（黒沈み緩和・前段）
+const GRAD_ALPHA_CEIL_WHITE = 0.95; // 白地の dense 上限（初期ほぼ無効）。黒=1.0で前段一致
+const alphaI = (i: number, P: LiquidGlassParams) => {
+  if (P.dotSource !== "gradient") return i;
+  const ceil = 1 + (GRAD_ALPHA_CEIL_WHITE - 1) * bgWhiteness(P);
+  return GRAD_ALPHA_FLOOR + (ceil - GRAD_ALPHA_FLOOR) * i;
+};
 
 function dotField(P: LiquidGlassParams, ph: number): Dot[] {
   const count = Math.max(17, Math.round(P.density));
@@ -171,7 +213,8 @@ function dotField(P: LiquidGlassParams, ph: number): Dot[] {
       let sr = Math.hypot(gx, gy),
         sa = Math.atan2(gy, gx);
       // 明るさの揺らぎは粒子固有（出生角で固定）— 環流中に明滅しない。
-      const light = 0.9 + 0.1 * Math.sin(sa * 2 - phaseA);
+      // 濃度均一化(gradient): 2ローブ角度変調の振幅を半減し帯太さのムラを抑える。
+      const light = 0.9 + (P.dotSource === "gradient" ? 0.03 : 0.1) * Math.sin(sa * 2 - phaseA);
       if (vortex) {
         // 各粒子は「帯中心からの相対距離 delta」を保ったまま、うねる帯に沿った
         // 閉軌道を周回する。強度は delta で決まり一定＝消える・湧くが起きない。
@@ -210,7 +253,8 @@ function dotField(P: LiquidGlassParams, ph: number): Dot[] {
       let shade = 1;
       if (P.motion === 2 && P.inflow > 0) {
         const wavePhase = 0.5 + 0.5 * Math.sin(TAU * 2 * ph + sr * 8 + 3 * sa);
-        shade = 1 + 0.7 * P.inflow * wavePhase * inten;
+        // 濃度均一化(gradient): 螺旋ハイライトの振幅を弱め帯中心の突出を抑える（意匠は維持）。
+        shade = 1 + (P.dotSource === "gradient" ? 0.3 : 0.7) * P.inflow * wavePhase * inten;
       }
       out.push({ x: rx0, y: ry0, i: inten, ang: wa + Math.PI / 2 + rotation, sr, shade });
     }
@@ -267,7 +311,7 @@ function drawC3(
       // 中央六角形は、穴に近いドットほど面積をなめらかに減衰（サイズ変化）させて表現。
       // 粒子渦(motion=3/4)でも同じ画面固定マスク＝軌道（動き）には影響しない。
       const weight = P.hexMask ? hexDotWeight(hexDistance(px - W / 2, py - H / 2), rimWidth) : 1;
-      const rx = cellPx * 0.5 * P.dotScale * (0.35 + 0.75 * Math.sqrt(dt.i)) * Math.sqrt(weight);
+      const rx = cellPx * 0.5 * P.dotScale * gradRadiusFactor(dt.i, P) * Math.sqrt(weight);
       const ry = rx * P.dotAspect;
       if (rx < 0.1 * S) continue;
       let col = base,
@@ -279,9 +323,9 @@ function drawC3(
         sa = d[k + 3] / 255;
         col = sa > 0.06 ? [d[k], d[k + 1], d[k + 2]] : base;
       } else if (P.dotSource === "gradient") {
-        col = gradientRgb(dt.sr, base2, base, P);
+        col = gradientRgb(dt.sr, dt.i, base2, base, P);
       }
-      const a = clamp(dt.i * dt.shade * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
+      const a = clamp(alphaI(dt.i, P) * dt.shade * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
       if (a < 0.02) continue;
       c.fillStyle = cstr(col, a);
       c.beginPath();
@@ -297,19 +341,19 @@ function drawC3(
 // 最新の LIQUID GLASS 保存設定を初期値として固定。
 export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   zoom: 0.6,
-  bg: "#000000",
+  bg: "#ffffff", // 既定＝白背景（最新save／Image #12）。濃度均一化も白背景基準で調整
   hexR: 0.185,
   hexRot: 0,
   hexSpin: 0,
   hexMask: 1,
   halftone: 1,
-  density: 78,
-  ringR: 0.42,
-  thickness: 0.495,
-  fieldBlur: 0.225,
+  density: 89,
+  ringR: 0.585,
+  thickness: 0.37,
+  fieldBlur: 0.21,
   threshold: 0,
   frequency: 7,
-  wave: 0.4,
+  wave: 0.64,
   turbulence: 0,
   swirl: 3,
   contrast: 1.4,
@@ -317,17 +361,17 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   dotAspect: 1.04,
   fieldRot: 3,
   fieldScale: 1,
-  dotAlpha: 0.65,
+  dotAlpha: 0.48,
   dotSource: "gradient", // 既定＝バイオレット→ティールのグラデーション（Image #8）
   dotColor: "#6a2bff", // 外側＝バイオレット（＋ワードマークのアクセント）
-  dotColor2: "#12e3c6", // 内側＝ティール
-  animA: 0,
-  animB: 3,
-  motion: 4, // 既定＝粒子渦（環流＋回転）。導入の「出現→回転開始」と整合しループも回転
-  inflow: 1,
+  dotColor2: "#17f0d9", // 内側＝やや明るい cyan 寄り teal（Image #12 の内側発色）
+  animA: 1,
+  animB: 0,
+  motion: 2, // 既定＝吸い込み（最新save）。この静止形状を基準に濃度均一を狙う
+  inflow: 1.25,
   count: 1,
   blend: "lighter",
-  wobble: 0.65,
+  wobble: 0,
   blur: 0,
   scale: 2,
   seed: 77,
@@ -350,7 +394,7 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
 // 6つのデフォルトカラーパターン。ドット(グラフィック)を単色化し、その色が
 // ワードマークのアクセント（「((」「))」）にも連動する（dotColor を共有）。
 export const LIQUID_GLASS_PRESETS: Partial<LiquidGlassParams>[] = [
-  { dotSource: "gradient", dotColor: "#6a2bff", dotColor2: "#12e3c6", bg: "#000000" }, // グラデ（Image #8）
+  { dotSource: "gradient", dotColor: "#6a2bff", dotColor2: "#17f0d9", bg: "#000000" }, // グラデ（Image #8/#12）
   { dotSource: "solid", dotColor: "#6a2bff", bg: "#000000" }, // バイオレット
   { dotSource: "solid", dotColor: "#ff2878", bg: "#000000" }, // ピンク（添付画像）
   { dotSource: "solid", dotColor: "#ff4a17", bg: "#000000" }, // オレンジ
@@ -495,7 +539,7 @@ function liquidGlassShapes(
     if (px < -20 || px > W + 20 || py < -20 || py > H + 20) continue;
     // 中央六角形は穴に近いドットほど面積をなめらかに減衰（サイズ変化）。
     const weight = P.hexMask ? hexDotWeight(hexDistance(px - W / 2, py - H / 2), rimWidth) : 1;
-    const rx = cellPx * 0.5 * P.dotScale * (0.35 + 0.75 * Math.sqrt(dt.i)) * Math.sqrt(weight);
+    const rx = cellPx * 0.5 * P.dotScale * gradRadiusFactor(dt.i, P) * Math.sqrt(weight);
     const ry = rx * P.dotAspect;
     if (rx < 0.1 * S) continue;
     let col = base,
@@ -507,9 +551,9 @@ function liquidGlassShapes(
       sa = d[k + 3] / 255;
       col = sa > 0.06 ? [d[k], d[k + 1], d[k + 2]] : base;
     } else if (P.dotSource === "gradient") {
-      col = gradientRgb(dt.sr, base2, base, P);
+      col = gradientRgb(dt.sr, dt.i, base2, base, P);
     }
-    const a = clamp(dt.i * dt.shade * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
+    const a = clamp(alphaI(dt.i, P) * dt.shade * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
     if (a < 0.02) continue;
     const fill = rgbHex(col);
     const o = a.toFixed(3);
@@ -626,13 +670,13 @@ function drawIntroReveal(
     if (a1 <= 0) continue; // 未出現
     // 六角形の穴は最初から適用（サイズ変化のみ）。tA=1 で全ドット不透明＝pattern4 と厳密一致。
     const weight = P.hexMask ? hexDotWeight(hexDistance(pxt - cx, pyt - cy), rimWidth) : 1;
-    const rx = cellPx * 0.5 * P.dotScale * (0.35 + 0.75 * Math.sqrt(dt.i)) * Math.sqrt(weight);
+    const rx = cellPx * 0.5 * P.dotScale * gradRadiusFactor(dt.i, P) * Math.sqrt(weight);
     if (rx < 0.1 * S) continue;
-    const a = clamp(dt.i * dt.shade * P.dotAlpha, 0, 1) * a1; // 不透明度だけを上げる
+    const a = clamp(alphaI(dt.i, P) * dt.shade * P.dotAlpha, 0, 1) * a1; // 不透明度だけを上げる
     if (a < 0.02) continue;
     // 色は drawC3 と一致させる（gradient は半径補間、それ以外は単色）。
     // ＝A末端が pattern4 と厳密一致。blob は導入中は単色フォールバック。
-    const col = P.dotSource === "gradient" ? gradientRgb(dt.sr, base2, base, P) : base;
+    const col = P.dotSource === "gradient" ? gradientRgb(dt.sr, dt.i, base2, base, P) : base;
     c.fillStyle = cstr(col, a);
     c.beginPath();
     if (Math.abs(P.dotAspect - 1) < 0.02) c.arc(pxt, pyt, rx, 0, TAU);
