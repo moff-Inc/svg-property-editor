@@ -26,6 +26,18 @@ export interface CanvasRenderer {
   render(ctx: CanvasRenderingContext2D, W: number, H: number, phase: number, params: Params): void;
   // 対応レンダラは編集可能なベクターSVGを生成（イラレ編集可）。無ければ埋め込みSVG。
   toSvg?(o: { phase: number; loopSeconds: number; params: Params }): string;
+  // 導入（出現）アニメの長さ（秒）。renderIntro を持つレンダラのみ設定。
+  introSeconds?: number;
+  // 導入アニメの1フレーム。t01=導入進行(0..1), phase=通常ループ位相（連続させて渡す）。
+  // t01=1 のフレームは render(phase) とピクセル一致すること（ループへ段差なく接続）。
+  renderIntro?(
+    ctx: CanvasRenderingContext2D,
+    W: number,
+    H: number,
+    t01: number,
+    phase: number,
+    params: Params,
+  ): void;
 }
 
 // 1つのモード（= かつての単一 CanvasContent 相当）

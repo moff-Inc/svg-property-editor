@@ -43,6 +43,7 @@ function paths() {
 }
 
 // canvas へ描画。(x,y) を左上、scale 倍、accent はアクセント色（「((」「))」）。
+// accentAlpha はアクセントのみの不透明度（導入の点滅用。既定1＝文字/®と同じ扱い）。
 export function drawMoodMetrix(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -50,6 +51,7 @@ export function drawMoodMetrix(
   scale: number,
   accent: string,
   letter = "#ffffff",
+  accentAlpha = 1,
 ) {
   const p = paths();
   ctx.save();
@@ -58,7 +60,14 @@ export function drawMoodMetrix(
   ctx.fillStyle = letter;
   for (const path of p.letters) ctx.fill(path);
   ctx.fillStyle = accent;
-  for (const path of p.accent) ctx.fill(path);
+  if (accentAlpha < 1) {
+    const prev = ctx.globalAlpha;
+    ctx.globalAlpha = prev * Math.max(0, accentAlpha);
+    for (const path of p.accent) ctx.fill(path);
+    ctx.globalAlpha = prev;
+  } else {
+    for (const path of p.accent) ctx.fill(path);
+  }
   // ® は文字と同色（＝インク色）。背景に応じた白/黒を letter で受け取る。
   ctx.fillStyle = letter;
   for (const path of p.mark) ctx.fill(path);

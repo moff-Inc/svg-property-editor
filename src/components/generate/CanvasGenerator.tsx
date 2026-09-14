@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import { MULTI_CONTENTS } from "@/lib/identity/registry";
 import type { CanvasRenderer, Params } from "@/lib/identity/types";
@@ -64,6 +64,8 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
 
   const [mode, setMode] = useState(initialMode);
   const active = content.modes.find((m) => m.value === mode) ?? content.modes[0];
+  // このモードが導入（出現）アニメに対応するか（ref を読まずに判定）。
+  const activeHasIntro = useMemo(() => !!active.create().renderIntro, [active]);
 
   const [params, setParams] = useState<Params>(() => {
     const init: Params = initial?.params ? { ...initial.params } : {};
@@ -99,6 +101,9 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
   const loopRef = useRef(loopSeconds);
   const phaseRef = useRef(0);
   const exportingRef = useRef(false);
+  // 導入（出現）アニメの再生状態。introActive の間は renderIntro を描画する。
+  const introActiveRef = useRef(false);
+  const introElapsedRef = useRef(0);
   const seekRef = useRef<HTMLInputElement>(null);
   const timeRef = useRef<HTMLSpanElement>(null);
   useEffect(() => {
@@ -126,20 +131,31 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
       last = now;
       raf = requestAnimationFrame(tick);
       if (exportingRef.current) return;
+      const r = rendererRef.current;
+      const introSecs = r?.introSeconds ?? 0;
       if (playingRef.current) {
         phaseRef.current = (phaseRef.current + dt / loopRef.current) % 1;
+        if (introActiveRef.current) {
+          introElapsedRef.current += dt;
+          if (introSecs <= 0 || introElapsedRef.current >= introSecs) introActiveRef.current = false;
+        }
       }
-      const r = rendererRef.current;
-      if (r) r.render(ctx, canvas.width, canvas.height, phaseRef.current, paramsRef.current);
-      // 再生バーを現在位相に同期。再生中は常に追従（スクラブ中は playing=false に
-      // なるため衝突しない）。一時停止＋フォーカス中のみ onSeek 側に委ねる。
+      const inIntro = introActiveRef.current && !!r?.renderIntro && introSecs > 0;
+      if (inIntro && r?.renderIntro) {
+        r.renderIntro(ctx, canvas.width, canvas.height, introElapsedRef.current / introSecs, phaseRef.current, paramsRef.current);
+      } else if (r) {
+        r.render(ctx, canvas.width, canvas.height, phaseRef.current, paramsRef.current);
+      }
+      // 再生バーは通常ループの位相に同期。導入中はシークが飛ばないよう更新しない。
       const seek = seekRef.current;
-      if (seek && (playingRef.current || document.activeElement !== seek)) {
+      if (!inIntro && seek && (playingRef.current || document.activeElement !== seek)) {
         seek.value = String(phaseRef.current);
         seek.style.setProperty("--fill", `${(phaseRef.current * 100).toFixed(1)}%`);
       }
       if (timeRef.current) {
-        timeRef.current.textContent = `${(phaseRef.current * loopRef.current).toFixed(1)}s / ${loopRef.current.toFixed(1)}s`;
+        timeRef.current.textContent = inIntro
+          ? `導入 ${introElapsedRef.current.toFixed(1)}s / ${introSecs.toFixed(1)}s`
+          : `${(phaseRef.current * loopRef.current).toFixed(1)}s / ${loopRef.current.toFixed(1)}s`;
       }
     };
     raf = requestAnimationFrame(tick);
@@ -153,7 +169,20 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
     setParams({ ...m.defaults });
     rendererRef.current = m.create();
     phaseRef.current = 0;
+    introActiveRef.current = false;
+    introElapsedRef.current = 0;
     setSaved(false);
+  }
+
+  // 導入（出現）アニメを頭から再生し、そのまま通常ループへ接続する。
+  function playIntro() {
+    const r = rendererRef.current;
+    if (!r?.renderIntro || !r.introSeconds) return;
+    introElapsedRef.current = 0;
+    introActiveRef.current = true;
+    phaseRef.current = 0;
+    playingRef.current = true;
+    setPlaying(true);
   }
 
   function applyPatch(patch: Params) {
@@ -163,6 +192,7 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
 
   // 再生バーでのシーク（停止してその位置を表示。書き出しは phaseRef を使用）
   function seekTo(v: number) {
+    introActiveRef.current = false; // 手動シーク時は導入を打ち切りループを表示
     // スライダーは [0,1] に制限済み。右端(1)で 0 へ折り返さないよう wrap ではなく clamp。
     phaseRef.current = Math.min(Math.max(v, 0), 1);
     if (playingRef.current) {
@@ -206,6 +236,11 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
     exportingRef.current = true;
     try {
       const r = active.create();
+      // 導入アニメ ON（intro=1 かつ対応レンダラ）のときは動画先頭に一度含める。
+      const introOn =
+        Boolean((paramsRef.current as Record<string, unknown>).intro) &&
+        !!r.renderIntro &&
+        !!r.introSeconds;
       await exportCanvasMp4({
         paint: (ctx, W, H, phase) => r.render(ctx, W, H, phase, paramsRef.current),
         width: EXPORT_W,
@@ -215,6 +250,11 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
         bitrateMbps,
         name: `identity_${content.no}_${mode}`,
         onProgress: (d, t) => setMp4Pct(Math.round((d / t) * 100)),
+        introSeconds: introOn ? r.introSeconds : undefined,
+        paintIntro:
+          introOn && r.renderIntro
+            ? (ctx, W, H, t01, phase) => r.renderIntro!(ctx, W, H, t01, phase, paramsRef.current)
+            : undefined,
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : "MP4の書き出しに失敗しました");
@@ -367,6 +407,15 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
                 </svg>
               )}
             </button>
+            {activeHasIntro && Boolean((params as Record<string, unknown>).intro) && (
+              <button
+                className="gen-tbtn gen-intro-btn"
+                onClick={playIntro}
+                title="導入アニメを頭から再生"
+              >
+                導入から再生
+              </button>
+            )}
             <input
               ref={seekRef}
               className="gen-seek"
@@ -471,16 +520,20 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
             <div className="gen-preset-grid">
               {active.presets.map((preset, i) => {
                 // カラーパターン等 dotColor を持つプリセットは色スウォッチで表示。
+                // gradient プリセットは内側→外側の2色でグラデーション表示。
+                const rec = preset as Record<string, unknown>;
+                const c1 = typeof rec.dotColor === "string" ? (rec.dotColor as string) : null;
+                const c2 = typeof rec.dotColor2 === "string" ? (rec.dotColor2 as string) : null;
                 const swatch =
-                  typeof (preset as Record<string, unknown>).dotColor === "string"
-                    ? ((preset as Record<string, unknown>).dotColor as string)
-                    : null;
+                  rec.dotSource === "gradient" && c1 && c2
+                    ? `linear-gradient(135deg, ${c2}, ${c1})`
+                    : c1;
                 return (
                   <button
                     key={i}
                     className="gen-preset"
                     onClick={() => applyPatch({ ...preset })}
-                    title={swatch ?? undefined}
+                    title={c1 ?? undefined}
                     style={
                       swatch
                         ? { background: swatch, borderColor: "transparent", color: "rgba(0,0,0,.5)" }
