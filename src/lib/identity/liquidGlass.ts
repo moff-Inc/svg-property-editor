@@ -45,11 +45,16 @@ export interface LiquidGlassParams {
   turbulence: number;
   swirl: number;
   contrast: number;
+  edgeFade: number; // 外周ソフトフェード（gradient専用, 0=前段一致 … 1=外縁alphaを透明へ）
   dotScale: number;
   dotAspect: number;
   fieldRot: number;
   fieldScale: number;
   dotAlpha: number;
+  armEven: number; // アーム密度均一化（gradient専用、0=無効）
+  dotBlur: number; // ドット自体のぼかし（px@1280基準、0=鮮明）
+  dotGlow: number; // ドット層の発光（全ソース, 0=無効=従来一致）。既存blur(blob円用)とは別レイヤー
+  dotGlowSize: number; // 発光の広がり（ぼかし半径 px@1280基準・実解像度で S=辺/1280 倍）
   dotSource: string; // blob|solid|gradient
   dotColor: string; // solid色／gradientの外側色（＋ワードマークのアクセント色）
   dotColor2: string; // gradientの内側色（半径で dotColor へ補間）
@@ -126,6 +131,8 @@ interface Dot {
   ang: number;
   sr: number;
   shade: number; // 吸い込みの陰影（不透明度係数、標準は1）
+  outer: number; // 帯縁(ringR±thickness/2)より外側の距離（0=帯内/内側）。外周フェード用・位置とは無関係
+  even: number; // アーム密度均一化の alpha 係数（標準=1・gradient時のみ≠1）
 }
 
 // グラデーション配色（Image #8）: 内側(inner=dotColor2)→外側(outer=dotColor)を
@@ -175,11 +182,70 @@ function gradRadiusFactor(i: number, P: LiquidGlassParams): number {
 // 黒背景は ceil=1.0 で前段式にバイト一致。solid/blob はゲートで raw i を返し完全不変。3経路が同一式。
 const GRAD_ALPHA_FLOOR = 0.15; // faint 下限（黒沈み緩和・前段）
 const GRAD_ALPHA_CEIL_WHITE = 0.95; // 白地の dense 上限（初期ほぼ無効）。黒=1.0で前段一致
-const alphaI = (i: number, P: LiquidGlassParams) => {
-  if (P.dotSource !== "gradient") return i;
+const EDGE_FADE_SPAN = 1.6; // 外周フェード全長 = sig(=max(0.012,fieldBlur)) × これ
+const alphaI = (i: number, P: LiquidGlassParams, outer = 0) => {
+  if (P.dotSource !== "gradient") return i; // solid/blob は raw i＝完全不変（floor 概念なし）
   const ceil = 1 + (GRAD_ALPHA_CEIL_WHITE - 1) * bgWhiteness(P);
-  return GRAD_ALPHA_FLOOR + (ceil - GRAD_ALPHA_FLOOR) * i;
+  const a = GRAD_ALPHA_FLOOR + (ceil - GRAD_ALPHA_FLOOR) * i;
+  // 外周ソフトフェード: 帯の外側ほど alpha を floor なしへ近づけ、
+  // 場の打ち切り直前も連続的に透明へ落として
+  // 輪郭の「切れ(a≈floor*dotAlpha の環がプツッと消える)」を無くす。帯縁(outer=0)/edgeFade=0 で前段一致。
+  if (P.edgeFade > 0 && outer > 0) {
+    const g = smoothstep(0, Math.max(0.012, P.fieldBlur) * EDGE_FADE_SPAN, outer);
+    const faded = ceil * i * smoothstep(0.015, 0.08, i);
+    return a + (faded - a) * P.edgeFade * g;
+  }
+  return a;
 };
+
+// アーム密度均一化(gradient): 各ドットの描画輝度プロキシ w=alphaI(i)·gradRadiusFactor(i)² を
+// 角度θ=atan2(y,x)でフーリエ展開し、腕骨格を除いた低〜中次ムラを打ち消す係数を Dot.even に保存。
+// 実測(既定 frequency=7)では角度ムラは3次(8.4%)・4次(15.5%)が支配的で、1,2次はほぼ皆無。
+// よって 1〜(frequency−2)次を補正対象とし、腕=frequency次とその隣接(±1=サイドバンド)は除外＝
+// 7アーム骨格は不変。位置(x,y,sr,ang)は読むだけ。
+const ARM_EVEN_MAXHARM = 6; // 補正の最大次数（コスト上限）。実次数は frequency−2 で頭打ち
+const ARM_EVEN_LIMIT = 0.5; // per-dot 係数の上下限(±)。暴走防止
+// m 次が腕骨格(=frequency の正の整数倍)の±1以内か＝補正から除外すべきか
+function isArmHarmonic(m: number, freq: number): boolean {
+  for (let k = 1; m + 1 >= k * freq; k++) if (Math.abs(m - k * freq) <= 1) return true;
+  return false;
+}
+function applyArmEven(out: Dot[], P: LiquidGlassParams) {
+  if (P.dotSource !== "gradient" || !(P.armEven > 0)) return; // undefined/0/solid/blob は完全不変
+  const freq = Math.max(2, Math.round(P.frequency));
+  const mmax = Math.min(ARM_EVEN_MAXHARM, Math.max(2, freq - 2));
+  const ms: number[] = []; // 補正対象の次数（腕骨格±1を除外）
+  for (let m = 1; m <= mmax; m++) if (!isArmHarmonic(m, freq)) ms.push(m);
+  if (!ms.length) return; // frequency が小さすぎて安全に均せる次数が無い
+  // 描画輝度プロキシの角度別 総和 を各対象次数でフーリエ係数化（DC＋cos/sin）
+  let sw = 0;
+  const cs: Record<number, number> = {},
+    sn: Record<number, number> = {};
+  for (const m of ms) {
+    cs[m] = 0;
+    sn[m] = 0;
+  }
+  for (const d of out) {
+    const rf = gradRadiusFactor(d.i, P);
+    const w = alphaI(d.i, P) * rf * rf; // 面積×不透明度の近似（色/hexは低次で無視可）
+    const th = Math.atan2(d.y, d.x);
+    sw += w;
+    for (const m of ms) {
+      cs[m] += w * Math.cos(m * th);
+      sn[m] += w * Math.sin(m * th);
+    }
+  }
+  if (sw < 1e-6) return;
+  for (const d of out) {
+    const th = Math.atan2(d.y, d.x);
+    let rel = 0; // その角度の（腕を除く）ムラ（平均からの相対偏差）
+    for (const m of ms) {
+      rel += (2 / sw) * (cs[m] * Math.cos(m * th) + sn[m] * Math.sin(m * th));
+    }
+    // rel>0 の角度は密＝薄く、rel<0 は疎＝濃く。armEven で強度調整、±LIMIT でクランプ。
+    d.even = clamp(1 - P.armEven * rel, 1 - ARM_EVEN_LIMIT, 1 + ARM_EVEN_LIMIT);
+  }
+}
 
 function dotField(P: LiquidGlassParams, ph: number): Dot[] {
   const count = Math.max(17, Math.round(P.density));
@@ -256,9 +322,29 @@ function dotField(P: LiquidGlassParams, ph: number): Dot[] {
         // 濃度均一化(gradient): 螺旋ハイライトの振幅を弱め帯中心の突出を抑える（意匠は維持）。
         shade = 1 + (P.dotSource === "gradient" ? 0.3 : 0.7) * P.inflow * wavePhase * inten;
       }
-      out.push({ x: rx0, y: ry0, i: inten, ang: wa + Math.PI / 2 + rotation, sr, shade });
+      // outer: 帯縁より外側のみ dOut（既存 sr/ringR/dOut を読むだけ・位置へ書戻さない）。内側/穴側は0。
+      out.push({ x: rx0, y: ry0, i: inten, ang: wa + Math.PI / 2 + rotation, sr, shade, outer: sr > ringR ? dOut : 0, even: 1 });
     }
+  applyArmEven(out, P); // 各アーム密度の均一化（gradient専用・位置不変・7次=腕は不変）
   return out;
+}
+
+// 発光を下に敷き、その上にドット層を合成。dotBlur=0 なら芯は鮮明なまま。
+// 全ソース(solid/gradient/blob)で有効。dl 依存の純関数＝決定的・ph0==ph1 でシームレス。
+function compositeDotGlow(
+  c: CanvasRenderingContext2D,
+  dl: HTMLCanvasElement,
+  glowPx: number,
+  glowStrength: number,
+  W: number,
+  H: number,
+  cache: LayerCache,
+  blurPx: number,
+) {
+  if (glowStrength > 0 && glowPx > 0.3) {
+    softDraw(c, dl, glowPx, glowStrength, "lighter", W, H, cache);
+  }
+  softDraw(c, dl, blurPx, 1, "source-over", W, H, cache);
 }
 
 function drawC3(
@@ -303,6 +389,20 @@ function drawC3(
     const rimWidth = Math.max(cellPx * 2.5, hr * 0.08);
     const base = rgbOf(P.dotColor);
     const base2 = rgbOf(P.dotColor2 || P.dotColor); // dotColor2 未設定時は dotColor へフォールバック
+    // 発光(dotGlow): 有効時は透明レイヤ(DL)へ描き後段でぼかし加算＋鮮明な芯を等倍重ね。
+    // 無効時は c へ直接＝中間レイヤ皆無で従来とバイト一致。glowPx は S=W/1280 でスケール。
+    const glowPx = (P.dotGlow || 0) > 0 ? (P.dotGlowSize || 0) * S : 0;
+    const glowOn = (P.dotGlow || 0) > 0 && glowPx > 0.3;
+    const blurPx = Math.max(0, P.dotBlur || 0) * S;
+    const DL = glowOn || blurPx > 0.3 ? cache.get("dotGlowLayer", W, H) : null;
+    const tg = DL ? DL.x : c;
+    if (DL) {
+      DL.x.setTransform(1, 0, 0, 1, 0, 0);
+      DL.x.clearRect(0, 0, W, H);
+      DL.x.globalAlpha = 1;
+      DL.x.filter = "none";
+      DL.x.globalCompositeOperation = "source-over";
+    }
     for (let i = 0; i < field.length; i++) {
       const dt = field[i];
       const px = W / 2 + dt.x * u,
@@ -325,14 +425,16 @@ function drawC3(
       } else if (P.dotSource === "gradient") {
         col = gradientRgb(dt.sr, dt.i, base2, base, P);
       }
-      const a = clamp(alphaI(dt.i, P) * dt.shade * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
-      if (a < 0.02) continue;
-      c.fillStyle = cstr(col, a);
-      c.beginPath();
-      if (Math.abs(P.dotAspect - 1) < 0.02) c.arc(px, py, rx, 0, TAU);
-      else c.ellipse(px, py, rx, ry, dt.ang, 0, TAU);
-      c.fill();
+      // edgeFade(alphaI 第3引数=dt.outer)と armEven(*dt.even) を alpha に同時適用（色/径/cull は不変）。
+      const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
+      if (a < (P.dotSource === "gradient" && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
+      tg.fillStyle = cstr(col, a);
+      tg.beginPath();
+      if (Math.abs(P.dotAspect - 1) < 0.02) tg.arc(px, py, rx, 0, TAU);
+      else tg.ellipse(px, py, rx, ry, dt.ang, 0, TAU);
+      tg.fill();
     }
+    if (DL) compositeDotGlow(c, DL.c, glowPx, P.dotGlow, W, H, cache, blurPx);
   } else {
     softDraw(c, F.c, P.blur * S * q, 1, "source-over", W, H, cache);
   }
@@ -357,11 +459,16 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   turbulence: 0,
   swirl: 3,
   contrast: 1.4,
+  edgeFade: 1, // 外周を透明までフェード。0でフェード無効
   dotScale: 1,
   dotAspect: 1.04,
   fieldRot: 3,
   fieldScale: 1,
   dotAlpha: 0.48,
+  armEven: 1, // 各アーム密度の均一化（左上の薄さを補正）
+  dotBlur: 1.2,
+  dotGlow: 0.35, // ドット層の淡い発光（Image #14 の violet アーム）。0で全経路バイト一致
+  dotGlowSize: 14, // 発光の広がり（px@1280）
   dotSource: "gradient", // 既定＝バイオレット→ティールのグラデーション（Image #8）
   dotColor: "#6a2bff", // 外側＝バイオレット（＋ワードマークのアクセント）
   dotColor2: "#17f0d9", // 内側＝やや明るい cyan 寄り teal（Image #12 の内側発色）
@@ -433,8 +540,10 @@ export const LIQUID_GLASS_CONTROLS: ControlsSpec = [
       ["ringR", "リング半径", "r", 0.15, 0.9, 0.005, ""],
       ["thickness", "リングの太さ", "r", 0.02, 0.8, 0.005, ""],
       ["fieldBlur", "リングのぼかし", "r", 0.02, 0.5, 0.005, ""],
+      ["edgeFade", "外周フェード", "r", 0, 1, 0.01, ""],
       ["threshold", "しきい値", "r", 0, 0.6, 0.005, ""],
       ["contrast", "コントラスト", "r", 0, 1.4, 0.01, ""],
+      ["armEven", "アーム密度の均一化", "r", 0, 1, 0.05, ""],
       ["frequency", "歪みの周波数", "r", 1, 12, 1, ""],
       ["wave", "歪み量", "r", 0, 2.5, 0.01, ""],
       ["turbulence", "乱れ", "r", 0, 2, 0.01, ""],
@@ -452,6 +561,9 @@ export const LIQUID_GLASS_CONTROLS: ControlsSpec = [
       ["dotColor", "カラー（単色／グラデ外側）", "k"],
       ["dotColor2", "グラデ内側カラー", "k"],
       ["dotAlpha", "ドットの不透明度", "r", 0, 1, 0.01, ""],
+      ["dotBlur", "ドットのぼかし", "r", 0, 12, 0.1, "px"],
+      ["dotGlow", "ドットの発光", "r", 0, 1, 0.01, ""],
+      ["dotGlowSize", "発光の広がり", "r", 0, 60, 1, "px"],
       ["count", "ブラー円の数", "r", 1, 6, 1, ""],
       ["scale", "円のスケール", "r", 0.4, 6, 0.01, ""],
       ["blur", "円のブラー", "r", 0, 140, 1, "px"],
@@ -490,8 +602,8 @@ const rgbHex = (c: number[]) =>
     .join("");
 
 // ハーフトーンのドット場を <circle>/<ellipse> 群で出力（W×H 空間・中央寄せ）。
-// 色はブラー円レイヤーからサンプリング（solid時は単色）。blur/背景ブロブ等の
-// raster 効果は省略。ロックアップ合成のため W,H を引数化した。
+// 色はブラー円レイヤーからサンプリング（solid時は単色）。背景ブロブは省略。
+// ドットのぼかし・発光は toSvg のフィルターで再現する。
 function liquidGlassShapes(
   P: LiquidGlassParams,
   ph: number,
@@ -553,8 +665,8 @@ function liquidGlassShapes(
     } else if (P.dotSource === "gradient") {
       col = gradientRgb(dt.sr, dt.i, base2, base, P);
     }
-    const a = clamp(alphaI(dt.i, P) * dt.shade * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
-    if (a < 0.02) continue;
+    const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
+    if (a < (P.dotSource === "gradient" && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
     const fill = rgbHex(col);
     const o = a.toFixed(3);
     if (Math.abs(P.dotAspect - 1) < 0.02) {
@@ -636,6 +748,7 @@ function drawIntroReveal(
   tA: number,
   phase: number,
   P: LiquidGlassParams,
+  cache: LayerCache, // 発光(グロー)合成用
 ) {
   const field = dotField({ ...P, motion: 4 }, phase);
   const u = H * 0.395 * P.zoom * P.fieldScale; // drawC3(正方形の一辺=H) と同一
@@ -652,6 +765,19 @@ function drawIntroReveal(
   const rOuter = P.ringR + P.thickness * 0.5 + 0.35; // 外周のおおよその最大半径（正規化用）
   // 各粒が透明→不透明になる窓（0..1）。小さめにして一粒ずつくっきり湧かせる（ポポポ）。
   const fadeWin = 0.34;
+  // 発光(グロー): drawC3 と同一機構。A末端(tA=1)==drawC3(motion4) の継ぎ目一致に必須。S=H/1280。
+  const glowPx = (P.dotGlow || 0) > 0 ? (P.dotGlowSize || 0) * S : 0;
+  const glowOn = (P.dotGlow || 0) > 0 && glowPx > 0.3;
+  const blurPx = Math.max(0, P.dotBlur || 0) * S;
+  const DL = glowOn || blurPx > 0.3 ? cache.get("dotGlowLayer", W, H) : null;
+  const tg = DL ? DL.x : c;
+  if (DL) {
+    DL.x.setTransform(1, 0, 0, 1, 0, 0);
+    DL.x.clearRect(0, 0, W, H);
+    DL.x.globalAlpha = 1;
+    DL.x.filter = "none";
+    DL.x.globalCompositeOperation = "source-over";
+  }
   for (let i = 0; i < field.length; i++) {
     const dt = field[i];
     const pxt = cx + dt.x * u,
@@ -672,17 +798,18 @@ function drawIntroReveal(
     const weight = P.hexMask ? hexDotWeight(hexDistance(pxt - cx, pyt - cy), rimWidth) : 1;
     const rx = cellPx * 0.5 * P.dotScale * gradRadiusFactor(dt.i, P) * Math.sqrt(weight);
     if (rx < 0.1 * S) continue;
-    const a = clamp(alphaI(dt.i, P) * dt.shade * P.dotAlpha, 0, 1) * a1; // 不透明度だけを上げる
-    if (a < 0.02) continue;
+    const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha, 0, 1) * a1; // 不透明度だけを上げる
+    if (a < (P.dotSource === "gradient" && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
     // 色は drawC3 と一致させる（gradient は半径補間、それ以外は単色）。
     // ＝A末端が pattern4 と厳密一致。blob は導入中は単色フォールバック。
     const col = P.dotSource === "gradient" ? gradientRgb(dt.sr, dt.i, base2, base, P) : base;
-    c.fillStyle = cstr(col, a);
-    c.beginPath();
-    if (Math.abs(P.dotAspect - 1) < 0.02) c.arc(pxt, pyt, rx, 0, TAU);
-    else c.ellipse(pxt, pyt, rx, rx * P.dotAspect, dt.ang, 0, TAU);
-    c.fill();
+    tg.fillStyle = cstr(col, a);
+    tg.beginPath();
+    if (Math.abs(P.dotAspect - 1) < 0.02) tg.arc(pxt, pyt, rx, 0, TAU);
+    else tg.ellipse(pxt, pyt, rx, rx * P.dotAspect, dt.ang, 0, TAU);
+    tg.fill();
   }
+  if (DL) compositeDotGlow(c, DL.c, glowPx, P.dotGlow, W, H, cache, blurPx);
 }
 
 // 導入1フレーム。t01=導入進行(0..1)、phase=通常ループ位相（連続で渡す）。
@@ -716,7 +843,7 @@ function renderLiquidGlassIntro(
     const g = cache.get("introGfx", Lc.D, Lc.D);
     g.x.setTransform(1, 0, 0, 1, 0, 0);
     g.x.clearRect(0, 0, Lc.D, Lc.D);
-    drawIntroReveal(g.x, Lc.D, Lc.D, t / bA, phase, P);
+    drawIntroReveal(g.x, Lc.D, Lc.D, t / bA, phase, P, cache);
     c.drawImage(g.c, Lc.gx, Lc.gy);
     return;
   }
@@ -802,11 +929,23 @@ export function createLiquidGlass(): CanvasRenderer {
       const showWord = P.wordmark == null ? true : !!P.wordmark;
       const L = lockupLayout(W, H, showWord, P);
       const shapes = liquidGlassShapes(P, phase, cache, L.D, L.D);
+      const blurPx = Math.max(0, P.dotBlur || 0) * L.D / 1280;
+      const glowPx = Math.max(0, P.dotGlowSize || 0) * L.D / 1280;
+      const glowOn = P.dotGlow > 0 && glowPx > 0.3;
+      const blurOn = blurPx > 0.3;
+      const pad = Math.ceil(Math.max(blurPx, glowOn ? glowPx : 0) * 4);
+      const effects = blurOn || glowOn
+        ? `<defs><filter id="liquid-dot-effects" filterUnits="userSpaceOnUse" x="${-pad}" y="${-pad}" width="${L.D + pad * 2}" height="${L.D + pad * 2}" color-interpolation-filters="sRGB">` +
+          (glowOn ? `<feGaussianBlur in="SourceGraphic" stdDeviation="${glowPx.toFixed(2)}" result="halo"/><feComponentTransfer in="halo" result="glow"><feFuncA type="linear" slope="${P.dotGlow}"/></feComponentTransfer>` : "") +
+          (blurOn ? `<feGaussianBlur in="SourceGraphic" stdDeviation="${blurPx.toFixed(2)}" result="core"/>` : "") +
+          `<feMerge>${glowOn ? '<feMergeNode in="glow"/>' : ""}<feMergeNode in="${blurOn ? "core" : "SourceGraphic"}"/></feMerge></filter></defs>`
+        : "";
       const bgRect = P.transparent ? "" : `<rect width="${W}" height="${H}" fill="${P.bg}"/>`;
-      const gfx = `<g transform="translate(${L.gx} ${L.gy})">${shapes}</g>`;
+      const gfx = `<g transform="translate(${L.gx} ${L.gy})"><g${effects ? ' filter="url(#liquid-dot-effects)"' : ""}>${shapes}</g></g>`;
       const wm = showWord ? moodMetrixSvg(L.wx, L.wy, L.wmScale, P.dotColor, inkFor(P.bg)) : "";
       return (
         `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">` +
+        effects +
         bgRect +
         gfx +
         wm +
