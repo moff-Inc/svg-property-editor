@@ -11,6 +11,14 @@ export type FramePainter = (
   H: number,
   phase: number,
 ) => void;
+// 導入（出現）用ペインタ。t01=導入進行(0..1), phase=通常ループ位相（連続）。
+export type IntroPainter = (
+  ctx: CanvasRenderingContext2D,
+  W: number,
+  H: number,
+  t01: number,
+  phase: number,
+) => void;
 export type Progress = (done: number, total: number) => void;
 
 function downloadBlob(blob: Blob, name: string, ext: string) {
@@ -31,8 +39,13 @@ export async function exportCanvasMp4(opts: {
   bitrateMbps: number;
   name: string;
   onProgress?: Progress;
+  // 動画の先頭に一度だけ再生する導入（出現）アニメ。省略時は従来どおりループのみ。
+  introSeconds?: number;
+  paintIntro?: IntroPainter;
 }): Promise<void> {
   const { paint, width, height, fps, loopSeconds, bitrateMbps, name, onProgress } = opts;
+  const introSeconds = opts.paintIntro && opts.introSeconds ? opts.introSeconds : 0;
+  const paintIntro = opts.paintIntro;
   const { sw, sh } = encodeDimensions(width, height);
   const canvas = document.createElement("canvas");
   canvas.width = sw;
@@ -40,8 +53,23 @@ export async function exportCanvasMp4(opts: {
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas 2D コンテキストを取得できませんでした");
 
-  const frameCount = Math.max(1, Math.round(loopSeconds * fps));
+  const introFrames = Math.round(introSeconds * fps);
+  // 導入フレーム＋ループ1周（loopSeconds ぶんで phase が 0..1 を一周＝末尾はシームレス）
+  const loopFrames = Math.max(1, Math.round(loopSeconds * fps));
+  const frameCount = introFrames + loopFrames;
   const frameDurUs = Math.round(1_000_000 / fps);
+  // フレーム i を描画。phase は全フレームで単一の通し時計を使う（導入→ループの
+  // 継ぎ目でも phase が連続＝回転が飛ばない）。ループ区間(loopFrames本)は phase を
+  // ちょうど1.0周ぶん進めるので区間単体でもシームレス。導入無効時は従来と同一列。
+  const paintFrame = (fi: number) => {
+    const tSec = fi / fps;
+    const phase = (tSec / loopSeconds) % 1;
+    if (introFrames > 0 && fi < introFrames && paintIntro) {
+      paintIntro(ctx, sw, sh, tSec / introSeconds, phase);
+    } else {
+      paint(ctx, sw, sh, phase);
+    }
+  };
   const bitrate = Math.min(40_000_000, Math.max(1_000_000, Math.round(bitrateMbps * 1_000_000)));
 
   // --- WebCodecs（決定論的・推奨） ---
@@ -72,8 +100,7 @@ export async function exportCanvasMp4(opts: {
     encoder.configure(config);
 
     for (let i = 0; i < frameCount; i++) {
-      const phase = i / frameCount; // 0..1 未満（1と0は同一フレーム=seamless）
-      paint(ctx, sw, sh, phase);
+      paintFrame(i);
       const frame = new VideoFrame(canvas, {
         timestamp: i * frameDurUs,
         duration: frameDurUs,
@@ -119,16 +146,22 @@ export async function exportCanvasMp4(opts: {
   });
   rec.start();
   const start = performance.now();
+  const totalSeconds = introSeconds + loopSeconds;
   await new Promise<void>((resolve) => {
     const tick = (now: number) => {
-      const phase = (now - start) / 1000 / loopSeconds;
-      if (phase >= 1) {
+      const tSec = (now - start) / 1000;
+      if (tSec >= totalSeconds) {
         paint(ctx, sw, sh, 0.9999);
         resolve();
         return;
       }
-      paint(ctx, sw, sh, phase);
-      onProgress?.(Math.min(frameCount, Math.round(phase * frameCount)), frameCount);
+      if (introFrames > 0 && tSec < introSeconds && paintIntro) {
+        paintIntro(ctx, sw, sh, tSec / introSeconds, (tSec / loopSeconds) % 1);
+      } else {
+        // 導入→ループも単一の通し時計で連続（phase を 0 に戻さない）。
+        paint(ctx, sw, sh, (tSec / loopSeconds) % 1);
+      }
+      onProgress?.(Math.min(frameCount, Math.round((tSec / totalSeconds) * frameCount)), frameCount);
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
