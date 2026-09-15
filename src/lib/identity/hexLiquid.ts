@@ -12,6 +12,12 @@ import {
   LIQUID_GLASS_CONTROLS,
   createLiquidGlass,
 } from "./liquidGlass";
+import {
+  createMockPreview,
+  MOCK_PREVIEW_DEFAULTS,
+  MOCK_PREVIEW_PRESETS,
+  MOCK_PREVIEW_CONTROLS,
+} from "./mockPreview";
 
 export const HEX_LIQUID: MultiModeContent = {
   slug: "hex-liquid",
@@ -34,6 +40,14 @@ export const HEX_LIQUID: MultiModeContent = {
       presets: HEX_HALO_PRESETS as unknown as Params[],
       controls: HEX_HALO_CONTROLS,
       create: createHexHalo,
+    },
+    {
+      value: "mock-preview",
+      label: "MOCK PREVIEW",
+      defaults: MOCK_PREVIEW_DEFAULTS,
+      presets: MOCK_PREVIEW_PRESETS,
+      controls: MOCK_PREVIEW_CONTROLS,
+      create: createMockPreview,
     },
   ],
 };

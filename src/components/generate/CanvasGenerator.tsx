@@ -64,6 +64,7 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
 
   const [mode, setMode] = useState(initialMode);
   const active = content.modes.find((m) => m.value === mode) ?? content.modes[0];
+  const isMockPreview = mode === "mock-preview";
   // このモードが導入（出現）アニメに対応するか（ref を読まずに判定）。
   const activeHasIntro = useMemo(() => !!active.create().renderIntro, [active]);
 
@@ -388,7 +389,13 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
               height={EXPORT_H}
               className="gen-canvas"
               style={{ aspectRatio: "16 / 9" }}
-            />
+              role="img"
+              aria-label={isMockPreview
+                ? `MOOD METRIXのモバイルモック。${params.mockTheme === "dark" ? "ダーク" : params.mockTheme === "system" ? "システム（ホワイト）" : "ダークとシステム（ホワイト）の比較"}。中央にLIQUID GLASSのパターン2、下部にEnergy・Calm・Focusのサンプル指標。表示内容は右側のコントロールで変更できます。`
+                : `${active.label}のアニメーションプレビュー`}
+            >
+              プレビューの表示にはCanvasに対応したブラウザが必要です。
+            </canvas>
           </div>
           <div className="gen-transport">
             <button
@@ -458,11 +465,41 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
                     key={m.value}
                     className={m.value === mode ? "is-active" : ""}
                     onClick={() => switchMode(m.value)}
+                    aria-pressed={m.value === mode}
                   >
                     {m.label}
                   </button>
                 ))}
               </div>
+            </div>
+          )}
+
+          {isMockPreview && (
+            <div className="gen-section">
+              <div className="gen-section-title">
+                <h2>外観 / APPEARANCE</h2>
+              </div>
+              <div className="gen-mock-themes" role="group" aria-label="モックの外観">
+                {[
+                  ["dark", "ダーク"],
+                  ["system", "システム（ホワイト）"],
+                  ["compare", "2タイプを比較"],
+                ].map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    aria-pressed={params.mockTheme === value}
+                    onClick={() => applyPatch({ mockTheme: value })}
+                  >
+                    <span className={`gen-mock-swatch is-${value}`} aria-hidden="true" />
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className="gen-mock-description">
+                LIQUID GLASSのパターン2を中心にしたモバイルUI。
+                システムはホワイト固定です。ムードと数値はデモ用に調整できます。
+              </p>
             </div>
           )}
 
@@ -512,7 +549,7 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
 
           <ControlsPanel spec={active.controls} params={params} onChange={applyPatch} />
 
-          <div className="gen-section">
+          {!isMockPreview && <div className="gen-section">
             <div className="gen-section-title">
               <h2>プリセット / PRESETS</h2>
               <span>{active.presets.length}</span>
@@ -524,10 +561,13 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
                 const rec = preset as Record<string, unknown>;
                 const c1 = typeof rec.dotColor === "string" ? (rec.dotColor as string) : null;
                 const c2 = typeof rec.dotColor2 === "string" ? (rec.dotColor2 as string) : null;
+                const c3 = typeof rec.dotColor3 === "string" ? (rec.dotColor3 as string) : null;
                 const swatch =
-                  rec.dotSource === "gradient" && c1 && c2
-                    ? `linear-gradient(135deg, ${c2}, ${c1})`
-                    : c1;
+                  rec.dotSource === "gradient3" && c1 && c2
+                    ? `linear-gradient(135deg, ${c2}, ${c3 ?? c1}, ${c1})`
+                    : rec.dotSource === "gradient" && c1 && c2
+                      ? `linear-gradient(135deg, ${c2}, ${c1})`
+                      : c1;
                 return (
                   <button
                     key={i}
@@ -545,11 +585,12 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
                 );
               })}
             </div>
-          </div>
+          </div>}
 
           <p className="gen-note">
-            再生バーで位置を合わせて停止すると、その瞬間が SVG / PNG に書き出されます。SVG
-            は図形を編集できます。メッシュは4色のグラデーションとマスクで再現しています。
+            {isMockPreview
+              ? "再生・停止とシークはグラフィック、カード、数値に連動します。PNG / MP4はモック全体を書き出します。モックのSVGは画像を埋め込む形式です。"
+              : "再生バーで位置を合わせて停止すると、その瞬間が SVG / PNG に書き出されます。SVGは図形を編集できます。メッシュは4色のグラデーションとマスクで再現しています。"}
           </p>
         </aside>
       </div>

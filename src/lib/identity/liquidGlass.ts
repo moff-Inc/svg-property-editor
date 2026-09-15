@@ -55,9 +55,17 @@ export interface LiquidGlassParams {
   dotBlur: number; // ドット自体のぼかし（px@1280基準、0=鮮明）
   dotGlow: number; // ドット層の発光（全ソース, 0=無効=従来一致）。既存blur(blob円用)とは別レイヤー
   dotGlowSize: number; // 発光の広がり（ぼかし半径 px@1280基準・実解像度で S=辺/1280 倍）
-  dotSource: string; // blob|solid|gradient
+  dotSource: string; // blob|solid|gradient|gradient3
   dotColor: string; // solid色／gradientの外側色（＋ワードマークのアクセント色）
   dotColor2: string; // gradientの内側色（半径で dotColor へ補間）
+  dotColor3: string; // 3色グラデ(gradient3)の中間色（内→中→外で補間）
+  gradMid: number; // 3色グラデの中間色の位置（0..1・既定0.5）。gradient3 のみ有効
+  // 色味調整レイヤー（全ソース共通の後段色補正・既定は無変換＝呼び出し前と同一）
+  toneHue: number; // 色相シフト（度・-180..180・0=無変換）
+  toneSat: number; // 彩度倍率（0..2・1=無変換）
+  toneBright: number; // 明るさ倍率（0..2・1=無変換）
+  toneTint: number; // 色被せ量（0..1・0=無効）
+  toneTintColor: string; // 色被せの色（toneTint>0 のとき各色へ寄せる）
   animA: number;
   animB: number;
   motion: number; // 1=標準, 2=陰影の吸い込み, 3=粒子渦（帯に沿って環流）, 4=粒子渦＋全体回転
@@ -144,17 +152,34 @@ const GRAD_LUMA_EVEN = 0.85; // 0=無補償 … 1=内外を等輝度化（inner/
 const luma601 = (c: number[]) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
 // 背景明度ゲート: 黒(0)で前段式にバイト一致・白(1)で白背景向け補償をフル適用（両背景で成立）。
 const bgWhiteness = (P: LiquidGlassParams) => clamp((luma601(rgbOf(P.bg)) / 255 - 0.5) / 0.5, 0, 1);
+// gradient(2色)/gradient3(3色) を「グラデーション経路」として共通に扱う（各 gate を集約）。
+// solid/blob は false ＝従来と完全に同じ経路を通る（バイト一致）。
+const isGradient = (P: LiquidGlassParams) => P.dotSource === "gradient" || P.dotSource === "gradient3";
 // 白背景の濃度均一化: 高i(=帯中心=各辺の濃い芯)ほど色を白へ寄せ、overlap で暗くなりすぎる
 // 飽和天井(≈255-luma)を下げて芯の突出を抑える。色/luma 領域の補償なので motion2 の shade
 // (alpha 再増幅)に相殺されない＝白地の主レバー。黒背景は bgWhiteness=0 で完全に無効。
 const CORE_LIFT_WHITE = 0.15; // 0=無効 … 白地で芯を白へ寄せる強度（推奨0.08–0.20。過大で芯が白抜け）
-function gradientRgb(sr: number, i: number, inner: number[], outer: number[], P: LiquidGlassParams): number[] {
+function gradientRgb(sr: number, i: number, inner: number[], mid: number[], outer: number[], P: LiquidGlassParams): number[] {
   const t = smoothstep(P.ringR - 0.28, P.ringR + 0.28, sr);
-  const col = [
-    inner[0] + (outer[0] - inner[0]) * t,
-    inner[1] + (outer[1] - inner[1]) * t,
-    inner[2] + (outer[2] - inner[2]) * t,
-  ];
+  // 2色(gradient): inner→outer を t で線形補間（前段と同一式＝バイト一致）。
+  // 3色(gradient3): inner→mid→outer を中間色位置 gradMid で2区間に分けて補間。
+  let col: number[];
+  if (P.dotSource === "gradient3") {
+    const gm = clamp(P.gradMid ?? 0.5, 0.02, 0.98);
+    if (t <= gm) {
+      const u = t / gm;
+      col = [inner[0] + (mid[0] - inner[0]) * u, inner[1] + (mid[1] - inner[1]) * u, inner[2] + (mid[2] - inner[2]) * u];
+    } else {
+      const u = (t - gm) / (1 - gm);
+      col = [mid[0] + (outer[0] - mid[0]) * u, mid[1] + (outer[1] - mid[1]) * u, mid[2] + (outer[2] - mid[2]) * u];
+    }
+  } else {
+    col = [
+      inner[0] + (outer[0] - inner[0]) * t,
+      inner[1] + (outer[1] - inner[1]) * t,
+      inner[2] + (outer[2] - inner[2]) * t,
+    ];
+  }
   const L0 = luma601(col);
   let out = col;
   if (L0 > 1) {
@@ -167,11 +192,63 @@ function gradientRgb(sr: number, i: number, inner: number[], outer: number[], P:
     : out;
 }
 
+// ── 色味調整レイヤー（TONE）────────────────────────────────────────────
+// 全ソース(solid/gradient/gradient3/blob)の「最終ドット色」に、色相/彩度/明るさ/色被せを
+// per-dot で適用する後段レイヤー。canvas と SVG 書き出しの双方で同一色を焼き込むため、
+// ベクター(各<circle fill>)にも調整結果が反映される。既定(hue0/sat1/bright1/tint0)は
+// 早期 return で入力配列をそのまま返す＝バイト完全一致。undefined(旧保存物)も既定へ吸収。
+function rgb2hsl(c: number[]): [number, number, number] {
+  const r = c[0] / 255, g = c[1] / 255, b = c[2] / 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  const l = (mx + mn) / 2;
+  let h = 0, s = 0;
+  if (d > 1e-9) {
+    s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+    if (mx === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+    else if (mx === g) h = ((b - r) / d + 2) / 6;
+    else h = ((r - g) / d + 4) / 6;
+  }
+  return [h, s, l];
+}
+function hue2rgb(p: number, q: number, t: number): number {
+  if (t < 0) t += 1;
+  if (t > 1) t -= 1;
+  if (t < 1 / 6) return p + (q - p) * 6 * t;
+  if (t < 1 / 2) return q;
+  if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+  return p;
+}
+function hsl2rgb(h: number, s: number, l: number): number[] {
+  if (s <= 1e-9) { const v = l * 255; return [v, v, v]; }
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+  const p = 2 * l - q;
+  return [hue2rgb(p, q, h + 1 / 3) * 255, hue2rgb(p, q, h) * 255, hue2rgb(p, q, h - 1 / 3) * 255];
+}
+function applyTone(rgb: number[], P: LiquidGlassParams): number[] {
+  const hue = P.toneHue || 0, sat = P.toneSat ?? 1, bri = P.toneBright ?? 1, tint = P.toneTint || 0;
+  if (hue === 0 && sat === 1 && bri === 1 && tint === 0) return rgb; // 無変換＝バイト一致
+  let [h, s, l] = rgb2hsl(rgb);
+  h = (h + hue / 360) % 1;
+  if (h < 0) h += 1;
+  s = clamp(s * sat, 0, 1);
+  l = clamp(l * bri, 0, 1);
+  let out = hsl2rgb(h, s, l);
+  if (tint > 0) {
+    const tc = rgbOf(P.toneTintColor || "#ffffff");
+    out = [out[0] + (tc[0] - out[0]) * tint, out[1] + (tc[1] - out[1]) * tint, out[2] + (tc[2] - out[2]) * tint];
+  }
+  return out;
+}
+// 色味調整が既定(無変換)以外か。true のときのみワードマークのアクセント色にもトーンを適用する。
+function toneActive(P: LiquidGlassParams): boolean {
+  return (P.toneHue || 0) !== 0 || (P.toneSat ?? 1) !== 1 || (P.toneBright ?? 1) !== 1 || (P.toneTint || 0) !== 0;
+}
+
 // per-dot 径係数(coverage)。gradient は白背景で floor を上げ faint を拡大し薄い辺を充填。
 // ピーク径(i=1)は 1.10 に固定＝各辺の芯サイズ・凝集は不変。黒背景は floor=0.66 で前段式にバイト一致。
 function gradRadiusFactor(i: number, P: LiquidGlassParams): number {
   const s = Math.sqrt(i);
-  if (P.dotSource !== "gradient") return 0.35 + 0.75 * s;
+  if (!isGradient(P)) return 0.35 + 0.75 * s;
   const floor = 0.66 + (0.7 - 0.66) * bgWhiteness(P);
   return floor + (1.1 - floor) * s;
 }
@@ -184,7 +261,7 @@ const GRAD_ALPHA_FLOOR = 0.15; // faint 下限（黒沈み緩和・前段）
 const GRAD_ALPHA_CEIL_WHITE = 0.95; // 白地の dense 上限（初期ほぼ無効）。黒=1.0で前段一致
 const EDGE_FADE_SPAN = 1.6; // 外周フェード全長 = sig(=max(0.012,fieldBlur)) × これ
 const alphaI = (i: number, P: LiquidGlassParams, outer = 0) => {
-  if (P.dotSource !== "gradient") return i; // solid/blob は raw i＝完全不変（floor 概念なし）
+  if (!isGradient(P)) return i; // solid/blob は raw i＝完全不変（floor 概念なし）
   const ceil = 1 + (GRAD_ALPHA_CEIL_WHITE - 1) * bgWhiteness(P);
   const a = GRAD_ALPHA_FLOOR + (ceil - GRAD_ALPHA_FLOOR) * i;
   // 外周ソフトフェード: 帯の外側ほど alpha を floor なしへ近づけ、
@@ -211,7 +288,7 @@ function isArmHarmonic(m: number, freq: number): boolean {
   return false;
 }
 function applyArmEven(out: Dot[], P: LiquidGlassParams) {
-  if (P.dotSource !== "gradient" || !(P.armEven > 0)) return; // undefined/0/solid/blob は完全不変
+  if (!isGradient(P) || !(P.armEven > 0)) return; // undefined/0/solid/blob は完全不変
   const freq = Math.max(2, Math.round(P.frequency));
   const mmax = Math.min(ARM_EVEN_MAXHARM, Math.max(2, freq - 2));
   const ms: number[] = []; // 補正対象の次数（腕骨格±1を除外）
@@ -280,7 +357,7 @@ function dotField(P: LiquidGlassParams, ph: number): Dot[] {
         sa = Math.atan2(gy, gx);
       // 明るさの揺らぎは粒子固有（出生角で固定）— 環流中に明滅しない。
       // 濃度均一化(gradient): 2ローブ角度変調の振幅を半減し帯太さのムラを抑える。
-      const light = 0.9 + (P.dotSource === "gradient" ? 0.03 : 0.1) * Math.sin(sa * 2 - phaseA);
+      const light = 0.9 + (isGradient(P) ? 0.03 : 0.1) * Math.sin(sa * 2 - phaseA);
       if (vortex) {
         // 各粒子は「帯中心からの相対距離 delta」を保ったまま、うねる帯に沿った
         // 閉軌道を周回する。強度は delta で決まり一定＝消える・湧くが起きない。
@@ -320,7 +397,7 @@ function dotField(P: LiquidGlassParams, ph: number): Dot[] {
       if (P.motion === 2 && P.inflow > 0) {
         const wavePhase = 0.5 + 0.5 * Math.sin(TAU * 2 * ph + sr * 8 + 3 * sa);
         // 濃度均一化(gradient): 螺旋ハイライトの振幅を弱め帯中心の突出を抑える（意匠は維持）。
-        shade = 1 + (P.dotSource === "gradient" ? 0.3 : 0.7) * P.inflow * wavePhase * inten;
+        shade = 1 + (isGradient(P) ? 0.3 : 0.7) * P.inflow * wavePhase * inten;
       }
       // outer: 帯縁より外側のみ dOut（既存 sr/ringR/dOut を読むだけ・位置へ書戻さない）。内側/穴側は0。
       out.push({ x: rx0, y: ry0, i: inten, ang: wa + Math.PI / 2 + rotation, sr, shade, outer: sr > ringR ? dOut : 0, even: 1 });
@@ -389,6 +466,7 @@ function drawC3(
     const rimWidth = Math.max(cellPx * 2.5, hr * 0.08);
     const base = rgbOf(P.dotColor);
     const base2 = rgbOf(P.dotColor2 || P.dotColor); // dotColor2 未設定時は dotColor へフォールバック
+    const base3 = rgbOf(P.dotColor3 || P.dotColor); // gradient3 の中間色。未設定時は dotColor
     // 発光(dotGlow): 有効時は透明レイヤ(DL)へ描き後段でぼかし加算＋鮮明な芯を等倍重ね。
     // 無効時は c へ直接＝中間レイヤ皆無で従来とバイト一致。glowPx は S=W/1280 でスケール。
     const glowPx = (P.dotGlow || 0) > 0 ? (P.dotGlowSize || 0) * S : 0;
@@ -422,12 +500,13 @@ function drawC3(
         const k = (sy * sw + sx) * 4;
         sa = d[k + 3] / 255;
         col = sa > 0.06 ? [d[k], d[k + 1], d[k + 2]] : base;
-      } else if (P.dotSource === "gradient") {
-        col = gradientRgb(dt.sr, dt.i, base2, base, P);
+      } else if (isGradient(P)) {
+        col = gradientRgb(dt.sr, dt.i, base2, base3, base, P);
       }
+      col = applyTone(col, P); // 色味調整レイヤー（既定は無変換）
       // edgeFade(alphaI 第3引数=dt.outer)と armEven(*dt.even) を alpha に同時適用（色/径/cull は不変）。
       const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
-      if (a < (P.dotSource === "gradient" && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
+      if (a < (isGradient(P) && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
       tg.fillStyle = cstr(col, a);
       tg.beginPath();
       if (Math.abs(P.dotAspect - 1) < 0.02) tg.arc(px, py, rx, 0, TAU);
@@ -472,6 +551,13 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   dotSource: "gradient", // 既定＝バイオレット→ティールのグラデーション（Image #8）
   dotColor: "#6a2bff", // 外側＝バイオレット（＋ワードマークのアクセント）
   dotColor2: "#17f0d9", // 内側＝やや明るい cyan 寄り teal（Image #12 の内側発色）
+  dotColor3: "#3d6bff", // 3色グラデ(gradient3)の中間色。既定 gradient では未使用
+  gradMid: 0.5, // 3色グラデの中間色の位置（0..1）
+  toneHue: 0, // 色味調整レイヤー: 既定は全て無変換＝既存の全出力とバイト一致
+  toneSat: 1,
+  toneBright: 1,
+  toneTint: 0,
+  toneTintColor: "#ffffff",
   animA: 1,
   animB: 0,
   motion: 2, // 既定＝吸い込み（最新save）。この静止形状を基準に濃度均一を狙う
@@ -501,6 +587,8 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
 // 6つのデフォルトカラーパターン。ドット(グラフィック)を単色化し、その色が
 // ワードマークのアクセント（「((」「))」）にも連動する（dotColor を共有）。
 export const LIQUID_GLASS_PRESETS: Partial<LiquidGlassParams>[] = [
+  { dotSource: "gradient", dotColor: "#4a44ff", dotColor2: "#23ecd8", bg: "#000000", zoom: 0.95, dotAlpha: 0.78 }, // ティール→ロイヤルブルー・黒背景（添付画像 上）
+  { dotSource: "gradient", dotColor: "#4a44ff", dotColor2: "#23ecd8", bg: "#ffffff", zoom: 0.95, dotAlpha: 0.72, toneSat: 1.25, toneBright: 0.95 }, // ティール→ロイヤルブルー・白背景（添付画像 下・色味調整で彩度/明るさ最適化）
   { dotSource: "gradient", dotColor: "#6a2bff", dotColor2: "#17f0d9", bg: "#000000" }, // グラデ（Image #8/#12）
   { dotSource: "solid", dotColor: "#6a2bff", bg: "#000000" }, // バイオレット
   { dotSource: "solid", dotColor: "#ff2878", bg: "#000000" }, // ピンク（添付画像）
@@ -557,7 +645,7 @@ export const LIQUID_GLASS_CONTROLS: ControlsSpec = [
   [
     "色 / COLOR",
     [
-      ["dotSource", "ドットの色", "s", ["blob", "solid", "gradient"]],
+      ["dotSource", "ドットの色", "o", [["blob", "円から採色"], ["solid", "単色"], ["gradient", "2色グラデ"], ["gradient3", "3色グラデ"]]],
       ["dotColor", "カラー（単色／グラデ外側）", "k"],
       ["dotColor2", "グラデ内側カラー", "k"],
       ["dotAlpha", "ドットの不透明度", "r", 0, 1, 0.01, ""],
@@ -569,6 +657,24 @@ export const LIQUID_GLASS_CONTROLS: ControlsSpec = [
       ["blur", "円のブラー", "r", 0, 140, 1, "px"],
       ["wobble", "円の揺らぎ", "r", 0, 3, 0.05, ""],
       ["blend", "円の合成", "s", ["source-over", "lighter", "multiply"]],
+    ],
+  ],
+  [
+    "3色グラデ / 3-COLOR",
+    [
+      ["dotColor3", "グラデ中間カラー", "k"],
+      ["gradMid", "中間色の位置", "r", 0.05, 0.95, 0.01, ""],
+    ],
+    { key: "dotSource", equals: "gradient3" }, // 3色グラデ選択時のみ表示
+  ],
+  [
+    "色味調整 / TONE",
+    [
+      ["toneHue", "色相シフト", "r", -180, 180, 1, "°"],
+      ["toneSat", "彩度", "r", 0, 2, 0.01, "×"],
+      ["toneBright", "明るさ", "r", 0, 2, 0.01, "×"],
+      ["toneTint", "色被せ量", "r", 0, 1, 0.01, ""],
+      ["toneTintColor", "色被せカラー", "k"],
     ],
   ],
   [
@@ -600,6 +706,11 @@ const rgbHex = (c: number[]) =>
     .slice(0, 3)
     .map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0"))
     .join("");
+
+// ワードマークのアクセント色。色味調整ON時は dotColor にも同じトーンを適用し、ドット群とロゴの
+// アクセントを同一トーンへ揃える。既定(無変換)は dotColor をそのまま返す＝従来出力とバイト一致。
+const accentColor = (P: LiquidGlassParams) =>
+  toneActive(P) ? rgbHex(applyTone(rgbOf(P.dotColor), P)) : P.dotColor;
 
 // ハーフトーンのドット場を <circle>/<ellipse> 群で出力（W×H 空間・中央寄せ）。
 // 色はブラー円レイヤーからサンプリング（solid時は単色）。背景ブロブは省略。
@@ -639,6 +750,7 @@ function liquidGlassShapes(
   const cellPx = spacingPx(P, u);
   const base = rgbOf(P.dotColor);
   const base2 = rgbOf(P.dotColor2 || P.dotColor); // dotColor2 未設定時は dotColor へフォールバック
+  const base3 = rgbOf(P.dotColor3 || P.dotColor); // gradient3 の中間色。未設定時は dotColor
   const rot = P.hexRot * RAD + ph * TAU * P.hexSpin;
   const hr = P.hexR * H * P.zoom;
   const hexDistance = hexagonDistance(hr, rot - Math.PI / 2);
@@ -662,11 +774,12 @@ function liquidGlassShapes(
       const k = (sy * sw + sx) * 4;
       sa = d[k + 3] / 255;
       col = sa > 0.06 ? [d[k], d[k + 1], d[k + 2]] : base;
-    } else if (P.dotSource === "gradient") {
-      col = gradientRgb(dt.sr, dt.i, base2, base, P);
+    } else if (isGradient(P)) {
+      col = gradientRgb(dt.sr, dt.i, base2, base3, base, P);
     }
+    col = applyTone(col, P); // 色味調整レイヤー（既定は無変換＝<circle fill> もバイト一致）
     const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
-    if (a < (P.dotSource === "gradient" && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
+    if (a < (isGradient(P) && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
     const fill = rgbHex(col);
     const o = a.toFixed(3);
     if (Math.abs(P.dotAspect - 1) < 0.02) {
@@ -760,6 +873,7 @@ function drawIntroReveal(
   const rimWidth = Math.max(cellPx * 2.5, hr * 0.08);
   const base = rgbOf(P.dotColor);
   const base2 = rgbOf(P.dotColor2 || P.dotColor); // dotColor2 未設定時は dotColor へフォールバック
+  const base3 = rgbOf(P.dotColor3 || P.dotColor); // gradient3 の中間色。未設定時は dotColor
   const cx = W / 2,
     cy = H / 2;
   const rOuter = P.ringR + P.thickness * 0.5 + 0.35; // 外周のおおよその最大半径（正規化用）
@@ -799,10 +913,10 @@ function drawIntroReveal(
     const rx = cellPx * 0.5 * P.dotScale * gradRadiusFactor(dt.i, P) * Math.sqrt(weight);
     if (rx < 0.1 * S) continue;
     const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha, 0, 1) * a1; // 不透明度だけを上げる
-    if (a < (P.dotSource === "gradient" && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
-    // 色は drawC3 と一致させる（gradient は半径補間、それ以外は単色）。
+    if (a < (isGradient(P) && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
+    // 色は drawC3 と一致させる（gradient は半径補間、それ以外は単色）＋色味調整レイヤー。
     // ＝A末端が pattern4 と厳密一致。blob は導入中は単色フォールバック。
-    const col = P.dotSource === "gradient" ? gradientRgb(dt.sr, dt.i, base2, base, P) : base;
+    const col = applyTone(isGradient(P) ? gradientRgb(dt.sr, dt.i, base2, base3, base, P) : base, P);
     tg.fillStyle = cstr(col, a);
     tg.beginPath();
     if (Math.abs(P.dotAspect - 1) < 0.02) tg.arc(pxt, pyt, rx, 0, TAU);
@@ -880,7 +994,7 @@ function renderLiquidGlassIntro(
     wx.globalAlpha = 1;
     wx.globalCompositeOperation = "source-over";
     wx.clearRect(0, 0, W, H);
-    drawMoodMetrix(wx, L.wx, L.wy, L.wmScale, P.dotColor, ink);
+    drawMoodMetrix(wx, L.wx, L.wy, L.wmScale, accentColor(P), ink);
     const span = LOGO_W * L.wmScale;
     const edge = Math.max(8, span * 0.28); // 透明グラデーションの柔らかさ
     const revealX = L.wx - edge + w * (span + 2 * edge);
@@ -896,7 +1010,7 @@ function renderLiquidGlassIntro(
   }
   // E: アクセントのみ点滅（終端 alpha=1 で確定＝ループへ接続）
   const e = (t - bD) / (1 - bD);
-  drawMoodMetrix(c, L.wx, L.wy, L.wmScale, P.dotColor, ink, flickerAlpha(e));
+  drawMoodMetrix(c, L.wx, L.wy, L.wmScale, accentColor(P), ink, flickerAlpha(e));
 }
 
 export function createLiquidGlass(): CanvasRenderer {
@@ -920,7 +1034,7 @@ export function createLiquidGlass(): CanvasRenderer {
       drawC3(g.x, L.D, L.D, phase, { ...P, transparent: 1 }, cache);
       ctx.drawImage(g.c, L.gx, L.gy);
       // 文字/® は背景色に対して自動でコントラスト（暗い背景=白, 明るい背景=黒）。
-      if (showWord) drawMoodMetrix(ctx, L.wx, L.wy, L.wmScale, P.dotColor, inkFor(P.bg));
+      if (showWord) drawMoodMetrix(ctx, L.wx, L.wy, L.wmScale, accentColor(P), inkFor(P.bg));
     },
     toSvg({ phase, params }) {
       const P = params as unknown as LiquidGlassParams;
@@ -942,7 +1056,7 @@ export function createLiquidGlass(): CanvasRenderer {
         : "";
       const bgRect = P.transparent ? "" : `<rect width="${W}" height="${H}" fill="${P.bg}"/>`;
       const gfx = `<g transform="translate(${L.gx} ${L.gy})"><g${effects ? ' filter="url(#liquid-dot-effects)"' : ""}>${shapes}</g></g>`;
-      const wm = showWord ? moodMetrixSvg(L.wx, L.wy, L.wmScale, P.dotColor, inkFor(P.bg)) : "";
+      const wm = showWord ? moodMetrixSvg(L.wx, L.wy, L.wmScale, accentColor(P), inkFor(P.bg)) : "";
       return (
         `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">` +
         effects +

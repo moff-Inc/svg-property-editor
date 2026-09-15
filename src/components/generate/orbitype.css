@@ -268,6 +268,30 @@
 .gen-mode-switch button:nth-last-child(-n + 2) { border-bottom: 0; }
 .gen-mode-switch button:hover { color: var(--ink); background: rgba(241, 242, 233, 0.035); }
 .gen-mode-switch button.is-active { color: var(--paper); background: var(--ink); }
+.gen-mode-switch button:last-child:nth-child(odd) { grid-column: 1 / -1; border-right: 0; }
+.gen-mode-switch button:nth-last-child(2):nth-child(even) { border-bottom: 1px solid var(--line); }
+.gen-mode-switch button:focus-visible,
+.gen-mock-themes button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.gen-mock-themes { display: grid; gap: 8px; }
+.gen-mock-themes button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  font-size: 11px;
+}
+.gen-mock-themes button[aria-pressed="true"] { border-color: var(--accent); background: var(--soft); }
+.gen-mock-swatch { width: 24px; height: 24px; border-radius: 6px; border: 1px solid #858897; }
+.gen-mock-swatch.is-dark { background: #101217; }
+.gen-mock-swatch.is-system { background: #fff; }
+.gen-mock-swatch.is-compare { background: linear-gradient(90deg, #101217 50%, #fff 50%); }
+.gen-mock-description { margin: 16px 0 0; color: #b5b8ad; font-size: 10px; line-height: 1.8; }
 
 /* rows */
 .gen-row { display: grid; grid-template-columns: 1fr 52px; align-items: center; gap: 10px; margin: 0 0 16px; color: var(--muted); font-size: 8px; letter-spacing: 0.08em; }
