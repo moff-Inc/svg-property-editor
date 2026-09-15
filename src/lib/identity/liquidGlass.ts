@@ -60,6 +60,8 @@ export interface LiquidGlassParams {
   dotColor2: string; // gradientの内側色（半径で dotColor へ補間）
   dotColor3: string; // 3色グラデ(gradient3)の中間色（内→中→外で補間）
   gradMid: number; // 3色グラデの中間色の位置（0..1・既定0.5）。gradient3 のみ有効
+  innerBright: number; // 内側ドットの明るさ倍率（0..2・1=無変換）。穴側の明るさ
+  outerBright: number; // 外側ドットの明るさ倍率（0..2・1=無変換）。外周の明るさ
   // 色味調整レイヤー（全ソース共通の後段色補正・既定は無変換＝呼び出し前と同一）
   toneHue: number; // 色相シフト（度・-180..180・0=無変換）
   toneSat: number; // 彩度倍率（0..2・1=無変換）
@@ -242,6 +244,19 @@ function applyTone(rgb: number[], P: LiquidGlassParams): number[] {
 // 色味調整が既定(無変換)以外か。true のときのみワードマークのアクセント色にもトーンを適用する。
 function toneActive(P: LiquidGlassParams): boolean {
   return (P.toneHue || 0) !== 0 || (P.toneSat ?? 1) !== 1 || (P.toneBright ?? 1) !== 1 || (P.toneTint || 0) !== 0;
+}
+
+// ドットの半径位置（穴側0→外周1）。内/外の明るさ配分に使う。
+const radialT = (sr: number, P: LiquidGlassParams) => smoothstep(P.ringR - 0.28, P.ringR + 0.28, sr);
+// ドット最終色への統合後段: ①内/外の明るさ（半径で innerBright→outerBright を補間しRGBへ乗算）
+// ②色味調整レイヤー。既定(inner/outer=1, tone無変換)は入力配列をそのまま返す＝バイト一致。
+function applyDotAppearance(col: number[], sr: number, P: LiquidGlassParams): number[] {
+  const ib = P.innerBright ?? 1, ob = P.outerBright ?? 1;
+  if (ib !== 1 || ob !== 1) {
+    const f = ib + (ob - ib) * radialT(sr, P);
+    col = [clamp(col[0] * f, 0, 255), clamp(col[1] * f, 0, 255), clamp(col[2] * f, 0, 255)];
+  }
+  return applyTone(col, P);
 }
 
 // per-dot 径係数(coverage)。gradient は白背景で floor を上げ faint を拡大し薄い辺を充填。
@@ -503,7 +518,7 @@ function drawC3(
       } else if (isGradient(P)) {
         col = gradientRgb(dt.sr, dt.i, base2, base3, base, P);
       }
-      col = applyTone(col, P); // 色味調整レイヤー（既定は無変換）
+      col = applyDotAppearance(col, dt.sr, P); // 内/外明るさ＋色味調整（既定は無変換）
       // edgeFade(alphaI 第3引数=dt.outer)と armEven(*dt.even) を alpha に同時適用（色/径/cull は不変）。
       const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
       if (a < (isGradient(P) && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
@@ -553,6 +568,8 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   dotColor2: "#17f0d9", // 内側＝やや明るい cyan 寄り teal（Image #12 の内側発色）
   dotColor3: "#3d6bff", // 3色グラデ(gradient3)の中間色。既定 gradient では未使用
   gradMid: 0.5, // 3色グラデの中間色の位置（0..1）
+  innerBright: 1, // 内側ドットの明るさ倍率（1=無変換）
+  outerBright: 1, // 外側ドットの明るさ倍率（1=無変換）
   toneHue: 0, // 色味調整レイヤー: 既定は全て無変換＝既存の全出力とバイト一致
   toneSat: 1,
   toneBright: 1,
@@ -657,6 +674,13 @@ export const LIQUID_GLASS_CONTROLS: ControlsSpec = [
       ["blur", "円のブラー", "r", 0, 140, 1, "px"],
       ["wobble", "円の揺らぎ", "r", 0, 3, 0.05, ""],
       ["blend", "円の合成", "s", ["source-over", "lighter", "multiply"]],
+    ],
+  ],
+  [
+    "見え方 / APPEARANCE",
+    [
+      ["innerBright", "内側の明るさ", "r", 0, 2, 0.01, "×"],
+      ["outerBright", "外側の明るさ", "r", 0, 2, 0.01, "×"],
     ],
   ],
   [
@@ -777,7 +801,7 @@ function liquidGlassShapes(
     } else if (isGradient(P)) {
       col = gradientRgb(dt.sr, dt.i, base2, base3, base, P);
     }
-    col = applyTone(col, P); // 色味調整レイヤー（既定は無変換＝<circle fill> もバイト一致）
+    col = applyDotAppearance(col, dt.sr, P); // 内/外明るさ＋色味調整（既定は無変換＝<circle fill> もバイト一致）
     const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
     if (a < (isGradient(P) && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
     const fill = rgbHex(col);
@@ -916,7 +940,7 @@ function drawIntroReveal(
     if (a < (isGradient(P) && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
     // 色は drawC3 と一致させる（gradient は半径補間、それ以外は単色）＋色味調整レイヤー。
     // ＝A末端が pattern4 と厳密一致。blob は導入中は単色フォールバック。
-    const col = applyTone(isGradient(P) ? gradientRgb(dt.sr, dt.i, base2, base3, base, P) : base, P);
+    const col = applyDotAppearance(isGradient(P) ? gradientRgb(dt.sr, dt.i, base2, base3, base, P) : base, dt.sr, P);
     tg.fillStyle = cstr(col, a);
     tg.beginPath();
     if (Math.abs(P.dotAspect - 1) < 0.02) tg.arc(pxt, pyt, rx, 0, TAU);
