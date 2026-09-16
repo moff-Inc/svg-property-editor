@@ -84,6 +84,7 @@ export interface LiquidGlassParams {
   wmX: number; // ワードマーク中心X（キャンバス幅比 0..1）
   wmY: number; // ワードマーク中心Y（キャンバス高比 0..1）
   intro?: number; // 導入（出現）アニメ: 0=なし, 1=渦の集結→出現→ロゴ
+  introPattern?: number; // ロゴ出現パターン: 1=ワイプ(左→右), 2=粒子集合（Dのワードマーク出現のみ差替）
   circles: CircleDef[];
   transparent?: number; // 背景透過（1でclear）
 }
@@ -593,6 +594,7 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   wmX: 0.65,
   wmY: 0.515,
   intro: 0,
+  introPattern: 1,
   transparent: 0,
   circles: [
     { col: "#4b3bf5", x: -0.09, y: -0.05, r: 0.4, a: 0.9, ring: 0.52, wob: 1.0 },
@@ -715,7 +717,10 @@ export const LIQUID_GLASS_CONTROLS: ControlsSpec = [
   ],
   [
     "導入 / INTRO",
-    [["intro", "導入アニメ（渦の集結→出現→ロゴ）", "c"]],
+    [
+      ["intro", "導入アニメ（渦の集結→出現→ロゴ）", "c"],
+      ["introPattern", "ロゴ出現パターン", "o", [["1", "ワイプ（左→右）"], ["2", "粒子集合"]]],
+    ],
   ],
   [
     "背景 / BACKGROUND",
@@ -963,6 +968,88 @@ function drawIntroReveal(
   if (DL) compositeDotGlow(c, DL.c, glowPx, P.dotGlow, W, H, cache, blurPx);
 }
 
+// ── 導入パターン2: ワードマークを粒子集合で出現させる（セクションDのみ差替）─────────
+type WmParticle = { x: number; y: number; accent: boolean; r: number; j: number; ox: number; oy: number };
+let _wmpCache: { sig: string; list: WmParticle[]; x0: number; x1: number } | null = null;
+// solidワードマークを文字/アクセント別にラスタライズ→グリッドサンプルで粒子化（署名で一度だけ構築）。
+function wordmarkParticles(
+  W: number, H: number, L: ReturnType<typeof lockupLayout>, ink: string, accent: string, cache: LayerCache,
+) {
+  const sig = [W, H, L.wx, L.wy, L.wmScale, ink, accent].join("|");
+  if (_wmpCache && _wmpCache.sig === sig) return _wmpCache;
+  const S = H / 1280;
+  const gp = Math.max(4, Math.round(L.wmScale * 2.4)); // グリッド間隔(px)
+  const lc = cache.get("wmSampleL", W, H);
+  lc.x.setTransform(1, 0, 0, 1, 0, 0);
+  lc.x.clearRect(0, 0, W, H);
+  drawMoodMetrix(lc.x, L.wx, L.wy, L.wmScale, "rgba(0,0,0,0)", "#ffffff"); // 文字+®のみ（アクセント透明）
+  const ac = cache.get("wmSampleA", W, H);
+  ac.x.setTransform(1, 0, 0, 1, 0, 0);
+  ac.x.clearRect(0, 0, W, H);
+  drawMoodMetrix(ac.x, L.wx, L.wy, L.wmScale, "#ffffff", "rgba(0,0,0,0)"); // アクセントのみ（文字透明）
+  const bx0 = Math.max(0, Math.floor(L.wx - 2)),
+    by0 = Math.max(0, Math.floor(L.wy - 2));
+  const bx1 = Math.min(W, Math.ceil(L.wx + LOGO_W * L.wmScale + 2)),
+    by1 = Math.min(H, Math.ceil(L.wy + LOGO_H * L.wmScale + 2));
+  const wI = bx1 - bx0,
+    hI = by1 - by0;
+  const Ld = lc.x.getImageData(bx0, by0, wI, hI).data;
+  const Ad = ac.x.getImageData(bx0, by0, wI, hI).data;
+  const list: WmParticle[] = [];
+  let x0 = Infinity,
+    x1 = -Infinity;
+  for (let yy = (gp >> 1); yy < hI; yy += gp) {
+    for (let xx = (gp >> 1); xx < wI; xx += gp) {
+      const a = (yy * wI + xx) * 4 + 3; // alpha チャンネル
+      const la = Ld[a],
+        aa = Ad[a];
+      if (la < 100 && aa < 100) continue; // 被覆なし
+      const px = bx0 + xx,
+        py = by0 + yy;
+      // 決定的ハッシュ（乱数不使用＝書き出しでも同一）。方向/量/順序ジッタを生成。
+      const h1 = Math.sin(px * 12.9898 + py * 78.233) * 43758.5453;
+      const j1 = h1 - Math.floor(h1);
+      const h2 = Math.sin(px * 39.3468 + py * 11.135) * 24634.6345;
+      const j2 = h2 - Math.floor(h2);
+      const ang = j1 * TAU,
+        amp = (14 + j2 * 30) * S; // 収束前の散らばり量
+      list.push({ x: px, y: py, accent: aa >= la, r: gp * 0.5, j: j1, ox: Math.cos(ang) * amp, oy: Math.sin(ang) * amp });
+      if (px < x0) x0 = px;
+      if (px > x1) x1 = px;
+    }
+  }
+  _wmpCache = { sig, list, x0, x1 };
+  return _wmpCache;
+}
+// w(0..1)で、散らばった粒子が左→右順に目標へ収束・拡大・フェードインして文字を形成。
+function drawWordmarkParticles(
+  c: CanvasRenderingContext2D, W: number, H: number,
+  L: ReturnType<typeof lockupLayout>, P: LiquidGlassParams, ink: string, w: number, cache: LayerCache,
+) {
+  const accent = accentColor(P);
+  const { list, x0, x1 } = wordmarkParticles(W, H, L, ink, accent, cache);
+  const win = 0.55; // 各粒の出現窓（広め＝滑らか）
+  const span = Math.max(1, x1 - x0);
+  const prev = c.globalAlpha;
+  c.globalCompositeOperation = "source-over";
+  for (const pt of list) {
+    const ord = (pt.x - x0) / span; // 左→右（元ワイプと同方向）
+    const o = clamp(ord * 0.82 + pt.j * 0.18, 0, 1); // per-粒ジッタで粒立ち
+    const local = clamp((w - o * (1 - win)) / win, 0, 1);
+    const a1 = local * local * local * (local * (local * 6 - 15) + 10); // smootherstep
+    if (a1 <= 0.001) continue;
+    const dx = (1 - a1) * pt.ox, // 収束: 出現前は散らばり→目標へ
+      dy = (1 - a1) * pt.oy;
+    const pr = pt.r * (0.45 + 0.55 * a1); // 拡大: 小さく湧いて定寸へ
+    c.globalAlpha = prev * a1;
+    c.fillStyle = pt.accent ? accent : ink;
+    c.beginPath();
+    c.arc(pt.x + dx, pt.y + dy, pr, 0, TAU);
+    c.fill();
+  }
+  c.globalAlpha = prev;
+}
+
 // 導入1フレーム。t01=導入進行(0..1)、phase=通常ループ位相（連続で渡す）。
 // t01=1 は render(phase) とピクセル一致するよう構成（ループへ段差なく接続）。
 function renderLiquidGlassIntro(
@@ -1022,9 +1109,21 @@ function renderLiquidGlassIntro(
   if (t < bC || !showWord) return;
 
   const ink = inkFor(P.bg);
-  // D: ロゴを左→右へグラデーションワイプで出現
+  // D: ロゴ出現。pattern1=左→右ワイプ / pattern2=粒子集合（Dのワードマーク出現のみ差替）
   if (t < bD) {
     const w = smoothstep(0, 1, (t - bC) / (bD - bC));
+    if (Number(P.introPattern ?? 1) === 2) {
+      // 粒子集合: 散らばった粒→左→右順に収束して文字化。終端でsolidへクロスフェード
+      // ＝D末端は現状ワイプと同じ solid ワードマーク（E・ループへ継ぎ目なし）。
+      drawWordmarkParticles(c, W, H, L, P, ink, w, cache);
+      const solid = smoothstep(0.82, 1, w);
+      if (solid > 0) {
+        c.globalAlpha = solid;
+        drawMoodMetrix(c, L.wx, L.wy, L.wmScale, accentColor(P), ink);
+        c.globalAlpha = 1;
+      }
+      return;
+    }
     const wm = cache.get("introWm", W, H);
     const wx = wm.x;
     wx.setTransform(1, 0, 0, 1, 0, 0);
