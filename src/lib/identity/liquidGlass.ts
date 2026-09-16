@@ -9,6 +9,7 @@ import {
   cstr,
   smoothstep,
   mulberry32,
+  makeNoise,
   softDraw,
   fillBg,
   LayerCache,
@@ -850,7 +851,7 @@ function lockupLayout(W: number, H: number, showWord: boolean, P: LiquidGlassPar
 //       C 現在の場所（左寄せ）で再出現（透明→不透明）
 //       D ロゴ(rogo.svg)を左→右へグラデーションワイプで表示
 //       E アクセントのみ点滅→点灯で確定し通常ループへ段差なく接続
-const INTRO_A = 5.2; // 出現(中心): 外周→中心へ一粒ずつ（radial ポポポ）
+const INTRO_A = 5.2; // 出現(中心): 左上→右下へ、見えないノイズ場から滑らかに湧出（born）
 const INTRO_B = 1.6; // 消失: 中央のまま薄く消える
 const INTRO_C = 2.4; // 再出現: 左寄せで透明→不透明
 const INTRO_D = 2.8; // ロゴ: 左→右へグラデーションワイプ
@@ -880,6 +881,9 @@ function flickerAlpha(e: number): number {
 // 小さい(中心寄り)ほど後。per-dot ハッシュで粒立ち。tA=0 で全ドット透明＝完全な黒、
 // tA=1 で全ドット不透明＝ drawC3(motion4, phase) と厳密一致（区間B の開始フレームと連続）。
 // 呼び出し側が drawC3 と同じ「中央 H×H 正方形」の ctx を渡す（W=H=正方形の一辺）。
+// 導入リビール用の「見えないテクスチャ」。決定的シードで固定（毎フレーム同一場）。
+const introNoise = makeNoise(20240917);
+
 function drawIntroReveal(
   c: CanvasRenderingContext2D,
   W: number,
@@ -902,9 +906,8 @@ function drawIntroReveal(
   const base3 = rgbOf(P.dotColor3 || P.dotColor); // gradient3 の中間色。未設定時は dotColor
   const cx = W / 2,
     cy = H / 2;
-  const rOuter = P.ringR + P.thickness * 0.5 + 0.35; // 外周のおおよその最大半径（正規化用）
-  // 各粒が透明→不透明になる窓（0..1）。小さめにして一粒ずつくっきり湧かせる（ポポポ）。
-  const fadeWin = 0.34;
+  // 各粒が透明→不透明になる窓（0..1）。広めにして境界を柔らかく＝滑らかに湧かせる。
+  const fadeWin = 0.5;
   // 発光(グロー): drawC3 と同一機構。A末端(tA=1)==drawC3(motion4) の継ぎ目一致に必須。S=H/1280。
   const glowPx = (P.dotGlow || 0) > 0 ? (P.dotGlowSize || 0) * S : 0;
   const glowOn = (P.dotGlow || 0) > 0 && glowPx > 0.3;
@@ -923,20 +926,23 @@ function drawIntroReveal(
     const pxt = cx + dt.x * u,
       pyt = cy + dt.y * u; // 目標位置（動かさない）
     if (pxt < -20 || pxt > W + 20 || pyt < -20 || pyt > H + 20) continue;
-    // 出現順: 外周(半径大)→中心(半径小)。radial を主にしつつ per-dot ハッシュ(jit)で
-    // 一粒ずつ湧かせる。frac で [0,1)、×(1-fadeWin) で最後の粒も tA=1 で完全不透明
-    // ＝末端は drawC3(P,0) と厳密一致。
-    const rad01 = clamp(dt.sr / rOuter, 0, 1); // 0=中心, 1=外周
+    // 出現順: 左上→右下の対角スイープ。見えないノイズ場(introNoise)で境界を歪ませ、
+    // ドットが“テクスチャーから生まれる”有機的な滲み出しにする。per-dot ハッシュ(jit)で粒状感。
+    // base∈[0,1] を保ち order=base*(1-fadeWin) とするため、どの粒も tA=1 で必ず a1=1 に
+    // 到達＝A末端は drawC3(motion4,phase) と厳密一致（Bへ段差なく接続）。
+    const diag = clamp((pxt + pyt) / (W + H), 0, 1); // 左上=0 → 右下=1
+    const n01 = 0.5 + 0.5 * introNoise((pxt / W) * 3.2, (pyt / H) * 3.2, 0); // 不可視テクスチャ [0,1]
     const hsh = Math.sin(i * 127.1 + 311.7) * 43758.5453; // 決定的（乱数不使用）
     const jit = hsh - Math.floor(hsh); // per-dot [0,1)
-    let ord = 0.6 * (1 - rad01) + 0.4 * jit; // 外周(rad01≈1)→ord小→先／中心→後
-    ord -= Math.floor(ord); // frac → [0,1)
-    const order = ord * (1 - fadeWin);
-    const a1 = smoothstep(0, 1, clamp((tA - order) / fadeWin, 0, 1)); // 透明→不透明
+    const rank = clamp(0.72 * diag + 0.2 * n01 + 0.08 * jit, 0, 1);
+    const order = rank * (1 - fadeWin);
+    const rt = clamp((tA - order) / fadeWin, 0, 1);
+    const a1 = rt * rt * rt * (rt * (rt * 6 - 15) + 10); // smootherstep（滑らか）
     if (a1 <= 0) continue; // 未出現
     // 六角形の穴は最初から適用（サイズ変化のみ）。tA=1 で全ドット不透明＝pattern4 と厳密一致。
     const weight = P.hexMask ? hexDotWeight(hexDistance(pxt - cx, pyt - cy), rimWidth) : 1;
-    const rx = cellPx * 0.5 * P.dotScale * gradRadiusFactor(dt.i, P) * Math.sqrt(weight);
+    const born = 0.32 + 0.68 * a1; // “生まれる”: 小さく湧いて定寸へ（a1=1で×1＝末端一致）
+    const rx = cellPx * 0.5 * P.dotScale * gradRadiusFactor(dt.i, P) * Math.sqrt(weight) * born;
     if (rx < 0.1 * S) continue;
     const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha, 0, 1) * a1; // 不透明度だけを上げる
     if (a < (isGradient(P) && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
@@ -975,7 +981,7 @@ function renderLiquidGlassIntro(
   const bC = (INTRO_A + INTRO_B + INTRO_C) / INTRO_T;
   const bD = (INTRO_A + INTRO_B + INTRO_C + INTRO_D) / INTRO_T;
 
-  // A: 中心で出現（外周→中心へ radial に一粒ずつ）。場は phase で一定速度に回転し続ける。
+  // A: 中心で出現（左上→右下へノイズ場から滑らかに湧出）。場は phase で一定速度に回転し続ける。
   // 中央 H×H オフスクリーンへ描いて合成（カル/クリップが drawC3 と一致＝A末端が
   // drawC3(motion4, phase) と厳密一致＝B開始と連続）。
   if (t < bA) {
