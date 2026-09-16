@@ -855,24 +855,29 @@ const INTRO_A = 5.2; // 出現(中心): 左上→右下へ、見えないノイ�
 const INTRO_B = 1.6; // 消失: 中央のまま薄く消える
 const INTRO_C = 2.4; // 再出現: 左寄せで透明→不透明
 const INTRO_D = 2.8; // ロゴ: 左→右へグラデーションワイプ
-const INTRO_E = 2.0; // 点滅: アクセントのみ→点灯で確定
-const INTRO_T = INTRO_A + INTRO_B + INTRO_C + INTRO_D + INTRO_E; // 14.0
+const INTRO_E = 3.0; // 波紋(明滅): アクセントのみ→点灯で確定（尺=従来2.0の1.5倍）
+const INTRO_T = INTRO_A + INTRO_B + INTRO_C + INTRO_D + INTRO_E; // 15.0
 export const LIQUID_GLASS_INTRO_SECONDS = INTRO_T;
 
-// アクセント点滅のキーフレーム（進行 e→不透明度）。乱数不使用＝書き出しでも同一。
-// 端点は必ず1（D終端＝アクセント点灯／ループ側＝点灯 と連続）。
-const FLICKER: [number, number][] = [
-  [0, 1], [0.1, 0.22], [0.18, 1], [0.3, 0.34], [0.4, 1], [0.52, 0.58], [0.64, 1], [1, 1],
-];
-function flickerAlpha(e: number): number {
+// アクセント「((」「))」の明滅的な波紋。内側リング先行→外側リング遅延＝両側とも外向きに伝播。
+// 返り値は ACCENT パス順 [右内, 右外, 左内, 左外] の不透明度（左右対称）。乱数不使用＝書き出しも同一。
+// 端点は必ず1（e=0: D終端＝点灯／e=1: ループ側＝点灯 と連続）。中間は波が外へ流れつつ明滅。
+const RIPPLE_CYCLES = 3; // 明滅（波紋）の回数
+const RIPPLE_GAP = 0.3; // 内→外の位相差（大きいほど外向き伝播が明瞭）
+function accentRipple(e: number): number[] {
   const x = clamp(e, 0, 1);
-  for (let i = 1; i < FLICKER.length; i++) {
-    if (x <= FLICKER[i][0]) {
-      const t = (x - FLICKER[i - 1][0]) / (FLICKER[i][0] - FLICKER[i - 1][0]);
-      return FLICKER[i - 1][1] + (FLICKER[i][1] - FLICKER[i - 1][1]) * t;
-    }
-  }
-  return 1;
+  const inb = smoothstep(0, 0.12, x); // 点灯→波紋へ導入
+  const outb = smoothstep(0.7, 1, x); // 波紋→点灯で確定
+  const ring = (r: number) => {
+    let p = 0.5 + 0.5 * Math.cos(TAU * (x * RIPPLE_CYCLES - r * RIPPLE_GAP)); // 外へ進む波 0..1
+    p = 0.16 + 0.84 * Math.pow(p, 1.7); // 明滅（暗部を締める。0にはしない＝消えすぎ防止）
+    let a = (1 - inb) * 1 + inb * p; // e=0 で 1
+    a = (1 - outb) * a + outb * 1; // e=1 で 1
+    return a;
+  };
+  const inner = ring(0),
+    outer = ring(1);
+  return [inner, outer, inner, outer]; // [右内, 右外, 左内, 左外]
 }
 
 // 区間A(中心で出現): 各ドットを、外周→中心の順に一粒ずつ透明→不透明でフェードイン
@@ -1040,9 +1045,9 @@ function renderLiquidGlassIntro(
     c.drawImage(wm.c, 0, 0);
     return;
   }
-  // E: アクセントのみ点滅（終端 alpha=1 で確定＝ループへ接続）
+  // E: アクセントのみ明滅波紋（内→外へ伝播。終端 alpha=1 で確定＝ループへ接続）
   const e = (t - bD) / (1 - bD);
-  drawMoodMetrix(c, L.wx, L.wy, L.wmScale, accentColor(P), ink, flickerAlpha(e));
+  drawMoodMetrix(c, L.wx, L.wy, L.wmScale, accentColor(P), ink, accentRipple(e));
 }
 
 export function createLiquidGlass(): CanvasRenderer {
