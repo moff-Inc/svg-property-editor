@@ -346,8 +346,10 @@ function dotField(P: LiquidGlassParams, ph: number): Dot[] {
   // 帯の形が時間で変わると粒子の明暗が揺れて出現/消滅に見えるため、位相は固定する。
   // motion=4 は同じ構造のまま全体を剛体回転させる版（1ループで1回転＝継ぎ目なし）。
   const vortex = P.motion === 3 || P.motion === 4;
-  const phaseA = r() * TAU + TAU * (vortex ? 0 : ph) * P.animA;
-  const phaseB = r() * TAU - TAU * (vortex ? 0 : ph) * P.animB;
+  // パターン2(吸い込み)は回転方向を反転。他モーションは dir=1 で従来どおり＝バイト一致。
+  const dir = P.motion === 2 ? -1 : 1;
+  const phaseA = r() * TAU + TAU * (vortex ? 0 : ph) * P.animA * dir;
+  const phaseB = r() * TAU - TAU * (vortex ? 0 : ph) * P.animB * dir;
   const spacing = 2.06 / (count - 1);
   const rotation = P.fieldRot * RAD + (P.motion === 4 ? TAU * ph : 0);
   const out: Dot[] = [];
@@ -410,7 +412,7 @@ function dotField(P: LiquidGlassParams, ph: number): Dot[] {
       // するため、濃い部分だけが腕づたいに吸い込まれて見え、薄い縁は静止する。
       let shade = 1;
       if (P.motion === 2 && P.inflow > 0) {
-        const wavePhase = 0.5 + 0.5 * Math.sin(TAU * 2 * ph + sr * 8 + 3 * sa);
+        const wavePhase = 0.5 + 0.5 * Math.sin(TAU * 2 * ph * dir + sr * 8 + 3 * sa);
         // 濃度均一化(gradient): 螺旋ハイライトの振幅を弱め帯中心の突出を抑える（意匠は維持）。
         shade = 1 + (isGradient(P) ? 0.3 : 0.7) * P.inflow * wavePhase * inten;
       }
