@@ -71,8 +71,8 @@ export interface LiquidGlassParams {
   toneTintColor: string; // 色被せの色（toneTint>0 のとき各色へ寄せる）
   animA: number;
   animB: number;
-  motion: number; // 1=標準, 2=陰影の吸い込み, 3=粒子渦（帯に沿って環流）, 4=粒子渦＋全体回転
-  inflow: number; // 吸い込みの強さ（motion=2 のとき有効）
+  motion: number; // 1=標準, 2=陰影の吸い込み, 3=粒子渦（帯に沿って環流）, 4=粒子渦＋全体回転, 5=グラデ反転波（内外色が波紋状に入替）
+  inflow: number; // 吸い込みの強さ（motion=2）／グラデ反転波の振幅（motion=5）で共用
   count: number;
   blend: string;
   wobble: number;
@@ -84,7 +84,7 @@ export interface LiquidGlassParams {
   wmX: number; // ワードマーク中心X（キャンバス幅比 0..1）
   wmY: number; // ワードマーク中心Y（キャンバス高比 0..1）
   intro?: number; // 導入（出現）アニメ: 0=なし, 1=渦の集結→出現→ロゴ
-  introPattern?: number; // ロゴ出現パターン: 1=ワイプ(左→右), 2=粒子集合（Dのワードマーク出現のみ差替）
+  introPattern?: number; // 導入パターン: 1=ワイプ, 2=粒子流動＋文字形成
   circles: CircleDef[];
   transparent?: number; // 背景透過（1でclear）
 }
@@ -137,14 +137,16 @@ const spacingPx = (P: LiquidGlassParams, u: number) =>
   (2.06 / (Math.max(17, Math.round(P.density)) - 1)) * u;
 
 interface Dot {
+  id: number; // 元グリッドの粒子ID。モーション間でも対応を維持する。
   x: number;
   y: number;
   i: number;
   ang: number;
   sr: number;
-  shade: number; // 吸い込みの陰影（不透明度係数、標準は1）
+  shade: number; // 吸い込みの陰影／グラデ反転波の透明度脈動（不透明度係数、標準は1）
   outer: number; // 帯縁(ringR±thickness/2)より外側の距離（0=帯内/内側）。外周フェード用・位置とは無関係
   even: number; // アーム密度均一化の alpha 係数（標準=1・gradient時のみ≠1）
+  tShift: number; // グラデ反転波(motion=5)のグラデ位置シフト（0=標準・teal↔violet を線上で入替）
 }
 
 // グラデーション配色（Image #8）: 内側(inner=dotColor2)→外側(outer=dotColor)を
@@ -163,8 +165,10 @@ const isGradient = (P: LiquidGlassParams) => P.dotSource === "gradient" || P.dot
 // 飽和天井(≈255-luma)を下げて芯の突出を抑える。色/luma 領域の補償なので motion2 の shade
 // (alpha 再増幅)に相殺されない＝白地の主レバー。黒背景は bgWhiteness=0 で完全に無効。
 const CORE_LIFT_WHITE = 0.15; // 0=無効 … 白地で芯を白へ寄せる強度（推奨0.08–0.20。過大で芯が白抜け）
-function gradientRgb(sr: number, i: number, inner: number[], mid: number[], outer: number[], P: LiquidGlassParams): number[] {
-  const t = smoothstep(P.ringR - 0.28, P.ringR + 0.28, sr);
+// tBias: グラデ位置 t を ±方向へずらす（motion=5 の色リップル用）。0=従来どおり＝バイト一致。
+// 色は必ず inner→outer グラデ「線上」を動くため、青/緑など第3色は増えない（同じ色域のまま位置だけ移動）。
+function gradientRgb(sr: number, i: number, inner: number[], mid: number[], outer: number[], P: LiquidGlassParams, tBias = 0): number[] {
+  const t = tBias === 0 ? smoothstep(P.ringR - 0.28, P.ringR + 0.28, sr) : clamp(smoothstep(P.ringR - 0.28, P.ringR + 0.28, sr) + tBias, 0, 1);
   // 2色(gradient): inner→outer を t で線形補間（前段と同一式＝バイト一致）。
   // 3色(gradient3): inner→mid→outer を中間色位置 gradMid で2区間に分けて補間。
   let col: number[];
@@ -341,6 +345,11 @@ function applyArmEven(out: Dot[], P: LiquidGlassParams) {
   }
 }
 
+// グラデ反転波(motion=5)のグラデ位置シフト振幅。大きいほど teal↔violet の入替が強い。
+// 0.5 で t=0.5 の帯中心が 0..1 を往復＝teal と violet が明確に入れ替わる。内側(t≈0)/外側(t≈1)は
+// クランプで teal/violet 側へ留まりやすく、内外の傾向を保ちつつ中間帯がリング状に入替わる。
+const SWAP_T_AMPLITUDE = 0.5;
+
 function dotField(P: LiquidGlassParams, ph: number): Dot[] {
   const count = Math.max(17, Math.round(P.density));
   const r = mulberry32(P.seed);
@@ -418,11 +427,70 @@ function dotField(P: LiquidGlassParams, ph: number): Dot[] {
         // 濃度均一化(gradient): 螺旋ハイライトの振幅を弱め帯中心の突出を抑える（意匠は維持）。
         shade = 1 + (isGradient(P) ? 0.3 : 0.7) * P.inflow * wavePhase * inten;
       }
+      // グラデ反転波(motion=5): 位置・形は標準のまま、色は teal→violet グラデの「位置 t」を
+      // 半径波でシフト(tShift)して波紋状に入れ替える。tShift は同心円(角度非依存, -sr*8)で
+      // 中心→外へ伝播。色は必ずグラデ線上を動くので青/緑の第3色は増えない（内側teal/外側violet
+      // の傾向も保持）。透明度(shade)も同位相で脈動＝リングが外へ発散。
+      // TAU*2*ph の整数周期でループ継ぎ目なし。inflow を振幅(0..1へクランプ)として共用＝0で無効。
+      // 他モーションは tShift=0/shade=1 で従来出力とバイト一致。
+      let tShift = 0;
+      if (P.motion === 5 && P.inflow > 0) {
+        const amp = clamp(P.inflow, 0, 1);
+        const s = Math.sin(TAU * 2 * ph - sr * 8); // 半径波 [-1,1]（角度非依存＝同心円）
+        tShift = SWAP_T_AMPLITUDE * amp * s; // グラデ位置を ±SWAP_T_AMPLITUDE 揺らして teal↔violet を入替
+        shade = 1 + 0.35 * amp * s; // 平均≈1・±0.35·amp のアルファ脈動（発散）
+      }
       // outer: 帯縁より外側のみ dOut（既存 sr/ringR/dOut を読むだけ・位置へ書戻さない）。内側/穴側は0。
-      out.push({ x: rx0, y: ry0, i: inten, ang: wa + Math.PI / 2 + rotation, sr, shade, outer: sr > ringR ? dOut : 0, even: 1 });
+      out.push({ id: row * count + col, x: rx0, y: ry0, i: inten, ang: wa + Math.PI / 2 + rotation, sr, shade, outer: sr > ringR ? dOut : 0, even: 1, tShift });
     }
   applyArmEven(out, P); // 各アーム密度の均一化（gradient専用・位置不変・7次=腕は不変）
   return out;
+}
+
+const smoother = (value: number) => {
+  const t = clamp(value, 0, 1);
+  return t * t * t * (t * (t * 6 - 15) + 10);
+};
+
+interface IntroFlow { progress: number; travel: number }
+
+// 同一IDの粒子を輸送する。端点では元の場と一致し、速度・加速度も通常運動へ接続する。
+function flowDotField(P: LiquidGlassParams, phase: number, flow: IntroFlow): Dot[] {
+  const source = dotField({ ...P, motion: 4 }, phase);
+  if (flow.progress <= 0) return source;
+  const target = dotField(P, phase);
+  if (flow.progress >= 1) return target;
+  const destinations = new Map(target.map(dot => [dot.id, dot]));
+  const origins = new Map(source.map(dot => [dot.id, dot]));
+  const ids = new Set([...origins.keys(), ...destinations.keys()]);
+  const move = smoother(flow.progress);
+  return Array.from(ids, id => {
+    const a = origins.get(id);
+    const b = destinations.get(id);
+    const from = a ?? b!;
+    const to = b ?? a!;
+    const seed = Math.sin(id * 127.1 + P.seed * 0.17) * 43758.5453;
+    const jitter = seed - Math.floor(seed);
+    const delay = 0.12 * clamp(0.7 * (from.x + 1) / 2 + 0.3 * jitter, 0, 1);
+    const local = smoother((flow.progress - delay) / (1 - delay));
+    const envelope = 16 * local * local * (1 - local) * (1 - local);
+    const mix = (x: number, y: number) => x + (y - x) * local;
+    // 左向きの輸送に小さな湾曲と幅を持たせる。ランダム値は粒子ID固定でシーク可能。
+    const bend = Math.sin(from.y * 4 + jitter * 1.6);
+    const angleDelta = Math.atan2(Math.sin(to.ang - from.ang), Math.cos(to.ang - from.ang));
+    return {
+      id,
+      x: mix(from.x, to.x) + flow.travel * (local - move) + envelope * 0.10 * (jitter - 0.5),
+      y: mix(from.y, to.y) + envelope * 0.14 * bend,
+      i: mix(from.i, to.i),
+      ang: from.ang + angleDelta * local,
+      sr: mix(from.sr, to.sr),
+      shade: mix(a ? from.shade : 0, b ? to.shade : 0),
+      outer: mix(from.outer, to.outer),
+      even: mix(from.even, to.even),
+      tShift: mix(from.tShift ?? 0, to.tShift ?? 0),
+    };
+  });
 }
 
 // 発光を下に敷き、その上にドット層を合成。dotBlur=0 なら芯は鮮明なまま。
@@ -450,6 +518,7 @@ function drawC3(
   ph: number,
   P: LiquidGlassParams,
   cache: LayerCache,
+  flow?: IntroFlow,
 ) {
   const S = W / 1280;
   c.setTransform(1, 0, 0, 1, 0, 0);
@@ -479,7 +548,7 @@ function drawC3(
     const SM = cache.get("sample", sw, sh);
     softDraw(SM.x, F.c, P.blur * S * q * (sw / W), 1, "source-over", sw, sh, cache);
     const d = SM.x.getImageData(0, 0, sw, sh).data;
-    const field = dotField(P, ph);
+    const field = flow ? flowDotField(P, ph, flow) : dotField(P, ph);
     const u = Math.min(W, H) * 0.395 * P.zoom * P.fieldScale;
     const cellPx = spacingPx(P, u);
     const rimWidth = Math.max(cellPx * 2.5, hr * 0.08);
@@ -520,7 +589,7 @@ function drawC3(
         sa = d[k + 3] / 255;
         col = sa > 0.06 ? [d[k], d[k + 1], d[k + 2]] : base;
       } else if (isGradient(P)) {
-        col = gradientRgb(dt.sr, dt.i, base2, base3, base, P);
+        col = gradientRgb(dt.sr, dt.i, base2, base3, base, P, dt.tShift);
       }
       col = applyDotAppearance(col, dt.sr, P); // 内/外明るさ＋色味調整（既定は無変換）
       // edgeFade(alphaI 第3引数=dt.outer)と armEven(*dt.even) を alpha に同時適用（色/径/cull は不変）。
@@ -650,7 +719,7 @@ export const LIQUID_GLASS_CONTROLS: ControlsSpec = [
       ["ringR", "リング半径", "r", 0.15, 0.9, 0.005, ""],
       ["thickness", "リングの太さ", "r", 0.02, 0.8, 0.005, ""],
       ["fieldBlur", "リングのぼかし", "r", 0.02, 0.5, 0.005, ""],
-      ["edgeFade", "外周フェード", "r", 0, 1, 0.01, ""],
+      ["edgeFade", "外周フェード", "r", 0, 1.5, 0.01, ""],
       ["threshold", "しきい値", "r", 0, 0.6, 0.005, ""],
       ["contrast", "コントラスト", "r", 0, 1.4, 0.01, ""],
       ["armEven", "アーム密度の均一化", "r", 0, 1, 0.05, ""],
@@ -709,8 +778,8 @@ export const LIQUID_GLASS_CONTROLS: ControlsSpec = [
   [
     "モーション / MOTION",
     [
-      ["motion", "動きのパターン", "o", [["1", "標準"], ["2", "吸い込み（中心へ流入）"], ["3", "粒子渦（環流）"], ["4", "粒子渦（環流＋回転）"]]],
-      ["inflow", "吸い込みの強さ", "r", 0, 2, 0.05, ""],
+      ["motion", "動きのパターン", "o", [["1", "標準"], ["2", "吸い込み（中心へ流入）"], ["3", "粒子渦（環流）"], ["4", "粒子渦（環流＋回転）"], ["5", "グラデ反転波（内外の色が波紋状に入替）"]]],
+      ["inflow", "吸い込み／入替の強さ", "r", 0, 2, 0.05, ""],
       ["animA", "歪みの周回数", "r", 0, 3, 1, "周"],
       ["animB", "渦の周回数", "r", 0, 3, 1, "周"],
     ],
@@ -719,7 +788,7 @@ export const LIQUID_GLASS_CONTROLS: ControlsSpec = [
     "導入 / INTRO",
     [
       ["intro", "導入アニメ（渦の集結→出現→ロゴ）", "c"],
-      ["introPattern", "ロゴ出現パターン", "o", [["1", "ワイプ（左→右）"], ["2", "粒子集合"]]],
+      ["introPattern", "ロゴ出現パターン", "o", [["1", "ワイプ（左→右）"], ["2", "粒子流動＋文字形成"]]],
     ],
   ],
   [
@@ -743,6 +812,24 @@ const rgbHex = (c: number[]) =>
 // アクセントを同一トーンへ揃える。既定(無変換)は dotColor をそのまま返す＝従来出力とバイト一致。
 const accentColor = (P: LiquidGlassParams) =>
   toneActive(P) ? rgbHex(applyTone(rgbOf(P.dotColor), P)) : P.dotColor;
+
+// ワードマークのアクセント（「((」「))」）の弧別色。ACCENT 順 [右内, 右外, 左内, 左外]。
+// グラデ反転波(motion=5)では、内弧/外弧を「基本指定カラーの2色（teal/violet）」だけで構成し、
+// ドットと同じ半径波で teal⇔violet をハード切替＝中間ブレンド（青/緑の第3色）を一切出さずに
+// 2色が入れ替わる。通常は内=teal・外=violet、波のピークで内⇔外が入れ替わる。inflow=0 で静的。
+// それ以外のモーション（や solid）は従来どおり単色 accentColor を返す＝バイト一致。
+function accentPalette(P: LiquidGlassParams, phase: number): string | string[] {
+  if (P.motion !== 5 || !isGradient(P)) return accentColor(P);
+  const amp = P.inflow > 0 ? clamp(P.inflow, 0, 1) : 0;
+  const teal = rgbHex(applyDotAppearance(rgbOf(P.dotColor2 || P.dotColor), P.ringR - 0.28, P)); // 内色
+  const violet = rgbHex(applyDotAppearance(rgbOf(P.dotColor), P.ringR + 0.28, P)); // 外色
+  // 弧の代表 t（内=teal寄り0.15 / 外=violet寄り0.85）を半径波でシフトし、0.5 をしきい値に純2色へスナップ。
+  const pick = (srRep: number, t0: number) =>
+    clamp(t0 + SWAP_T_AMPLITUDE * amp * Math.sin(TAU * 2 * phase - srRep * 8), 0, 1) < 0.5 ? teal : violet;
+  const innerArc = pick(P.ringR - 0.28, 0.15); // 通常 teal → 入替で violet
+  const outerArc = pick(P.ringR + 0.28, 0.85); // 通常 violet → 入替で teal
+  return [innerArc, outerArc, innerArc, outerArc]; // [右内, 右外, 左内, 左外]（左右対称・純2色のみ）
+}
 
 // ハーフトーンのドット場を <circle>/<ellipse> 群で出力（W×H 空間・中央寄せ）。
 // 色はブラー円レイヤーからサンプリング（solid時は単色）。背景ブロブは省略。
@@ -807,7 +894,7 @@ function liquidGlassShapes(
       sa = d[k + 3] / 255;
       col = sa > 0.06 ? [d[k], d[k + 1], d[k + 2]] : base;
     } else if (isGradient(P)) {
-      col = gradientRgb(dt.sr, dt.i, base2, base3, base, P);
+      col = gradientRgb(dt.sr, dt.i, base2, base3, base, P, dt.tShift);
     }
     col = applyDotAppearance(col, dt.sr, P); // 内/外明るさ＋色味調整（既定は無変換＝<circle fill> もバイト一致）
     const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
@@ -852,16 +939,16 @@ function lockupLayout(W: number, H: number, showWord: boolean, P: LiquidGlassPar
 // ── 導入（出現）アニメ「テーマ1: 中心で集合→左で確定」──────────────────
 // 各区間の長さ（秒）。合計＝導入尺。回転は全区間 phase 直結＝一定速度。
 // 構成: A 中心で出現（外周→中心へ一粒ずつポポポ／回転は一定速度で継続）
-//       B 中央のまま薄く消失
-//       C 現在の場所（左寄せ）で再出現（透明→不透明）
+//       B 中央のまま薄く消失（パターン2はB+Cを使って左へ連続移動）
+//       C 現在の場所（左寄せ）で再出現（パターン2は移動を継続）
 //       D ロゴ(rogo.svg)を左→右へグラデーションワイプで表示
 //       E アクセントのみ点滅→点灯で確定し通常ループへ段差なく接続
 const INTRO_A = 5.2; // 出現(中心): 左上→右下へ、見えないノイズ場から滑らかに湧出（born）
 const INTRO_B = 1.6; // 消失: 中央のまま薄く消える
 const INTRO_C = 2.4; // 再出現: 左寄せで透明→不透明
-const INTRO_D = 2.8; // ロゴ: 左→右へグラデーションワイプ
+const INTRO_D = 4.8; // ロゴ出現(ワイプ/粒子集合)。粒子構築をゆっくり見せるため延長(旧2.8)
 const INTRO_E = 3.0; // 波紋(明滅): アクセントのみ→点灯で確定（尺=従来2.0の1.5倍）
-const INTRO_T = INTRO_A + INTRO_B + INTRO_C + INTRO_D + INTRO_E; // 15.0
+const INTRO_T = INTRO_A + INTRO_B + INTRO_C + INTRO_D + INTRO_E; // 17.0
 export const LIQUID_GLASS_INTRO_SECONDS = INTRO_T;
 
 // アクセント「((」「))」の明滅的な波紋。内側リング先行→外側リング遅延＝両側とも外向きに伝播。
@@ -944,7 +1031,11 @@ function drawIntroReveal(
     const n01 = 0.5 + 0.5 * introNoise((pxt / W) * 3.2, (pyt / H) * 3.2, 0); // 不可視テクスチャ [0,1]
     const hsh = Math.sin(i * 127.1 + 311.7) * 43758.5453; // 決定的（乱数不使用）
     const jit = hsh - Math.floor(hsh); // per-dot [0,1)
-    const rank = clamp(0.72 * diag + 0.2 * n01 + 0.08 * jit, 0, 1);
+    const flowPattern = Number(P.introPattern) === 2;
+    const count = Math.max(17, Math.round(P.density));
+    // 移動する画面座標で出現順を再計算しない＝出現途中の明滅を防ぐ。
+    const birthOrder = 0.86 * (dt.id % count) / (count - 1) + 0.14 * Math.floor(dt.id / count) / (count - 1);
+    const rank = flowPattern ? birthOrder : clamp(0.72 * diag + 0.2 * n01 + 0.08 * jit, 0, 1);
     const order = rank * (1 - fadeWin);
     const rt = clamp((tA - order) / fadeWin, 0, 1);
     const a1 = rt * rt * rt * (rt * (rt * 6 - 15) + 10); // smootherstep（滑らか）
@@ -954,11 +1045,12 @@ function drawIntroReveal(
     const born = 0.32 + 0.68 * a1; // “生まれる”: 小さく湧いて定寸へ（a1=1で×1＝末端一致）
     const rx = cellPx * 0.5 * P.dotScale * gradRadiusFactor(dt.i, P) * Math.sqrt(weight) * born;
     if (rx < 0.1 * S) continue;
-    const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha, 0, 1) * a1; // 不透明度だけを上げる
-    if (a < (isGradient(P) && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
+    const baseAlpha = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha, 0, 1);
+    const a = baseAlpha * a1;
+    if ((flowPattern ? baseAlpha : a) < (isGradient(P) && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
     // 色は drawC3 と一致させる（gradient は半径補間、それ以外は単色）＋色味調整レイヤー。
     // ＝A末端が pattern4 と厳密一致。blob は導入中は単色フォールバック。
-    const col = applyDotAppearance(isGradient(P) ? gradientRgb(dt.sr, dt.i, base2, base3, base, P) : base, dt.sr, P);
+    const col = applyDotAppearance(isGradient(P) ? gradientRgb(dt.sr, dt.i, base2, base3, base, P, dt.tShift) : base, dt.sr, P);
     tg.fillStyle = cstr(col, a);
     tg.beginPath();
     if (Math.abs(P.dotAspect - 1) < 0.02) tg.arc(pxt, pyt, rx, 0, TAU);
@@ -968,16 +1060,30 @@ function drawIntroReveal(
   if (DL) compositeDotGlow(c, DL.c, glowPx, P.dotGlow, W, H, cache, blurPx);
 }
 
-// ── 導入パターン2: ワードマークを粒子集合で出現させる（セクションDのみ差替）─────────
-type WmParticle = { x: number; y: number; accent: boolean; r: number; j: number; ox: number; oy: number };
+// ── 導入パターン2: 左グラフィックから流れた粒子がワードマークを形成する ─────────
+type WmParticle = {
+  x: number;
+  y: number;
+  accent: boolean;
+  r: number;
+  j: number;
+  sx: number;
+  sy: number;
+  cx: number;
+  cy: number;
+};
 let _wmpCache: { sig: string; list: WmParticle[]; x0: number; x1: number } | null = null;
 // solidワードマークを文字/アクセント別にラスタライズ→グリッドサンプルで粒子化（署名で一度だけ構築）。
 function wordmarkParticles(
-  W: number, H: number, L: ReturnType<typeof lockupLayout>, ink: string, accent: string, cache: LayerCache,
+  W: number, H: number, L: ReturnType<typeof lockupLayout>, P: LiquidGlassParams,
+  ink: string, accent: string, cache: LayerCache,
 ) {
-  const sig = [W, H, L.wx, L.wy, L.wmScale, ink, accent].join("|");
-  if (_wmpCache && _wmpCache.sig === sig) return _wmpCache;
   const S = H / 1280;
+  const fieldReach = L.D * 0.395 * P.zoom * P.fieldScale;
+  const sourceX = Math.min(L.wx - 18 * S, L.gx + L.D / 2 + fieldReach * 0.86);
+  const sourceY = L.gy + L.D / 2;
+  const sig = [W, H, L.wx, L.wy, L.wmScale, sourceX, sourceY, ink, accent].join("|");
+  if (_wmpCache && _wmpCache.sig === sig) return _wmpCache;
   const gp = Math.max(4, Math.round(L.wmScale * 2.4)); // グリッド間隔(px)
   const lc = cache.get("wmSampleL", W, H);
   lc.x.setTransform(1, 0, 0, 1, 0, 0);
@@ -1011,9 +1117,13 @@ function wordmarkParticles(
       const j1 = h1 - Math.floor(h1);
       const h2 = Math.sin(px * 39.3468 + py * 11.135) * 24634.6345;
       const j2 = h2 - Math.floor(h2);
-      const ang = j1 * TAU,
-        amp = (14 + j2 * 30) * S; // 収束前の散らばり量
-      list.push({ x: px, y: py, accent: aa >= la, r: gp * 0.5, j: j1, ox: Math.cos(ang) * amp, oy: Math.sin(ang) * amp });
+      // 左グラフィックの縁から連続して流れ、緩いS字カーブで文字の目標点へ収束する。
+      const spread = (j2 - 0.5) * 92 * S;
+      const sx = sourceX + (j1 - 0.5) * 18 * S,
+        sy = sourceY + spread;
+      const cx = sourceX + (px - sourceX) * (0.38 + j1 * 0.08),
+        cy = sourceY + (py - sourceY) * 0.24 + Math.sin(j1 * TAU) * 42 * S;
+      list.push({ x: px, y: py, accent: aa >= la, r: gp * 0.5, j: j1, sx, sy, cx, cy });
       if (px < x0) x0 = px;
       if (px > x1) x1 = px;
     }
@@ -1021,30 +1131,32 @@ function wordmarkParticles(
   _wmpCache = { sig, list, x0, x1 };
   return _wmpCache;
 }
-// w(0..1)で、散らばった粒子が左→右順に目標へ収束・拡大・フェードインして文字を形成。
+// w(0..1)で、左グラフィックから流れた粒子が左→右順に文字を形成する。
 function drawWordmarkParticles(
   c: CanvasRenderingContext2D, W: number, H: number,
   L: ReturnType<typeof lockupLayout>, P: LiquidGlassParams, ink: string, w: number, cache: LayerCache,
 ) {
   const accent = accentColor(P);
-  const { list, x0, x1 } = wordmarkParticles(W, H, L, ink, accent, cache);
-  const win = 0.55; // 各粒の出現窓（広め＝滑らか）
+  const { list, x0, x1 } = wordmarkParticles(W, H, L, P, ink, accent, cache);
+  const win = 0.76; // 形成時間を重ね、文字間で動きが止まらないようにする。
   const span = Math.max(1, x1 - x0);
   const prev = c.globalAlpha;
   c.globalCompositeOperation = "source-over";
   for (const pt of list) {
     const ord = (pt.x - x0) / span; // 左→右（元ワイプと同方向）
-    const o = clamp(ord * 0.82 + pt.j * 0.18, 0, 1); // per-粒ジッタで粒立ち
+    const o = clamp(ord * 0.9 + pt.j * 0.1, 0, 1);
     const local = clamp((w - o * (1 - win)) / win, 0, 1);
-    const a1 = local * local * local * (local * (local * 6 - 15) + 10); // smootherstep
-    if (a1 <= 0.001) continue;
-    const dx = (1 - a1) * pt.ox, // 収束: 出現前は散らばり→目標へ
-      dy = (1 - a1) * pt.oy;
-    const pr = pt.r * (0.45 + 0.55 * a1); // 拡大: 小さく湧いて定寸へ
-    c.globalAlpha = prev * a1;
+    const travel = smoother(local);
+    const visibility = smoothstep(0, 0.32, local); // 早めに十分な濃度へ到達し、流動中の薄さを防ぐ。
+    if (visibility <= 0.001) continue;
+    const inv = 1 - travel;
+    const px = inv * inv * pt.sx + 2 * inv * travel * pt.cx + travel * travel * pt.x;
+    const py = inv * inv * pt.sy + 2 * inv * travel * pt.cy + travel * travel * pt.y;
+    const pr = pt.r * (0.28 + 0.72 * smoother(clamp(local / 0.82, 0, 1)));
+    c.globalAlpha = prev * visibility;
     c.fillStyle = pt.accent ? accent : ink;
     c.beginPath();
-    c.arc(pt.x + dx, pt.y + dy, pr, 0, TAU);
+    c.arc(px, py, pr, 0, TAU);
     c.fill();
   }
   c.globalAlpha = prev;
@@ -1072,6 +1184,9 @@ function renderLiquidGlassIntro(
   const bB = (INTRO_A + INTRO_B) / INTRO_T;
   const bC = (INTRO_A + INTRO_B + INTRO_C) / INTRO_T;
   const bD = (INTRO_A + INTRO_B + INTRO_C + INTRO_D) / INTRO_T;
+  const introPattern = Number(P.introPattern ?? 1);
+  const isFlowPattern = introPattern === 2;
+  const wordStart = bC - 1.2 / INTRO_T; // 左移動の終盤1.2秒から文字形成を重ねる。
 
   // A: 中心で出現（左上→右下へノイズ場から滑らかに湧出）。場は phase で一定速度に回転し続ける。
   // 中央 H×H オフスクリーンへ描いて合成（カル/クリップが drawC3 と一致＝A末端が
@@ -1083,6 +1198,27 @@ function renderLiquidGlassIntro(
     g.x.clearRect(0, 0, Lc.D, Lc.D);
     drawIntroReveal(g.x, Lc.D, Lc.D, t / bA, phase, P, cache);
     c.drawImage(g.c, Lc.gx, Lc.gy);
+    return;
+  }
+  const showWord = P.wordmark == null ? true : !!P.wordmark;
+  const L = lockupLayout(W, H, showWord, P);
+  const ink = inkFor(P.bg);
+
+  // パターン2: 粒子IDを保って中央から左へ輸送。画像のクロスフェードは行わない。
+  if (isFlowPattern && t < bC) {
+    const progress = (t - bA) / (bC - bA);
+    const move = smoother(progress);
+    const Lc = lockupLayout(W, H, false, P);
+    const gx = Lc.gx + (L.gx - Lc.gx) * move;
+    const g = cache.get("introGfx", L.D, L.D);
+    const unit = L.D * 0.395 * P.zoom * P.fieldScale;
+    drawC3(g.x, L.D, L.D, phase, { ...P, transparent: 1 }, cache, {
+      progress, travel: (L.gx - Lc.gx) / Math.max(0.001, unit),
+    });
+    c.drawImage(g.c, gx, L.gy);
+    if (showWord && t > wordStart) {
+      drawWordmarkParticles(c, W, H, L, P, ink, (t - wordStart) / (bD - wordStart), cache);
+    }
     return;
   }
   // B: 消失（中央・motion4 をフェードアウト）
@@ -1098,8 +1234,6 @@ function renderLiquidGlassIntro(
   }
   // C/D/E: 選択中モーションを「現在の場所」で再出現。ワードマーク表示なら左寄せ、
   // 非表示なら中央（＝通常ループと同じ配置。終端が render と一致する）。
-  const showWord = P.wordmark == null ? true : !!P.wordmark;
-  const L = lockupLayout(W, H, showWord, P);
   const g = cache.get("introGfx", L.D, L.D);
   drawC3(g.x, L.D, L.D, phase, { ...P, transparent: 1 }, cache);
   c.globalAlpha = t < bC ? smoothstep(0, 1, (t - bB) / (bC - bB)) : 1; // C: 透明→不透明
@@ -1108,18 +1242,17 @@ function renderLiquidGlassIntro(
   // ワードマーク非表示なら D/E のロゴ演出はスキップ（C以降はグラフィックのみを保持）。
   if (t < bC || !showWord) return;
 
-  const ink = inkFor(P.bg);
-  // D: ロゴ出現。pattern1=左→右ワイプ / pattern2=粒子集合（Dのワードマーク出現のみ差替）
+  // D: ロゴ出現。pattern1=左→右ワイプ / pattern2=左グラフィックから粒子形成
   if (t < bD) {
     const w = smoothstep(0, 1, (t - bC) / (bD - bC));
-    if (Number(P.introPattern ?? 1) === 2) {
-      // 粒子集合: 散らばった粒→左→右順に収束して文字化。終端でsolidへクロスフェード
-      // ＝D末端は現状ワイプと同じ solid ワードマーク（E・ループへ継ぎ目なし）。
-      drawWordmarkParticles(c, W, H, L, P, ink, w, cache);
-      const solid = smoothstep(0.82, 1, w);
+    if (introPattern === 2) {
+      const wordProgress = (t - wordStart) / (bD - wordStart);
+      // 左グラフィックから流れた粒子を文字化し、終端だけsolidへ接続する。
+      drawWordmarkParticles(c, W, H, L, P, ink, wordProgress, cache);
+      const solid = smoothstep(0.92, 1, wordProgress);
       if (solid > 0) {
         c.globalAlpha = solid;
-        drawMoodMetrix(c, L.wx, L.wy, L.wmScale, accentColor(P), ink);
+        drawMoodMetrix(c, L.wx, L.wy, L.wmScale, accentPalette(P, phase), ink);
         c.globalAlpha = 1;
       }
       return;
@@ -1130,7 +1263,7 @@ function renderLiquidGlassIntro(
     wx.globalAlpha = 1;
     wx.globalCompositeOperation = "source-over";
     wx.clearRect(0, 0, W, H);
-    drawMoodMetrix(wx, L.wx, L.wy, L.wmScale, accentColor(P), ink);
+    drawMoodMetrix(wx, L.wx, L.wy, L.wmScale, accentPalette(P, phase), ink);
     const span = LOGO_W * L.wmScale;
     const edge = Math.max(8, span * 0.28); // 透明グラデーションの柔らかさ
     const revealX = L.wx - edge + w * (span + 2 * edge);
@@ -1146,7 +1279,7 @@ function renderLiquidGlassIntro(
   }
   // E: アクセントのみ明滅波紋（内→外へ伝播。終端 alpha=1 で確定＝ループへ接続）
   const e = (t - bD) / (1 - bD);
-  drawMoodMetrix(c, L.wx, L.wy, L.wmScale, accentColor(P), ink, accentRipple(e));
+  drawMoodMetrix(c, L.wx, L.wy, L.wmScale, accentPalette(P, phase), ink, accentRipple(e));
 }
 
 export function createLiquidGlass(): CanvasRenderer {
@@ -1170,7 +1303,7 @@ export function createLiquidGlass(): CanvasRenderer {
       drawC3(g.x, L.D, L.D, phase, { ...P, transparent: 1 }, cache);
       ctx.drawImage(g.c, L.gx, L.gy);
       // 文字/® は背景色に対して自動でコントラスト（暗い背景=白, 明るい背景=黒）。
-      if (showWord) drawMoodMetrix(ctx, L.wx, L.wy, L.wmScale, accentColor(P), inkFor(P.bg));
+      if (showWord) drawMoodMetrix(ctx, L.wx, L.wy, L.wmScale, accentPalette(P, phase), inkFor(P.bg));
     },
     toSvg({ phase, params }) {
       const P = params as unknown as LiquidGlassParams;
@@ -1192,7 +1325,7 @@ export function createLiquidGlass(): CanvasRenderer {
         : "";
       const bgRect = P.transparent ? "" : `<rect width="${W}" height="${H}" fill="${P.bg}"/>`;
       const gfx = `<g transform="translate(${L.gx} ${L.gy})"><g${effects ? ' filter="url(#liquid-dot-effects)"' : ""}>${shapes}</g></g>`;
-      const wm = showWord ? moodMetrixSvg(L.wx, L.wy, L.wmScale, accentColor(P), inkFor(P.bg)) : "";
+      const wm = showWord ? moodMetrixSvg(L.wx, L.wy, L.wmScale, accentPalette(P, phase), inkFor(P.bg)) : "";
       return (
         `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">` +
         effects +

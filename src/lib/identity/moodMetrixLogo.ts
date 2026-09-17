@@ -43,6 +43,7 @@ function paths() {
 }
 
 // canvas へ描画。(x,y) を左上、scale 倍、accent はアクセント色（「((」「))」）。
+// accent は string=全弧一律 / string[]=弧ごとの個別色（波紋グラデ連動用）。
 // accentAlpha はアクセントの不透明度。number=全パス一律（導入の点滅用、既定1）。
 // number[]=パスごと（波紋アニメ用）。ACCENT の順序は [右内, 右外, 左内, 左外]。
 export function drawMoodMetrix(
@@ -50,7 +51,7 @@ export function drawMoodMetrix(
   x: number,
   y: number,
   scale: number,
-  accent: string,
+  accent: string | string[],
   letter = "#ffffff",
   accentAlpha: number | number[] = 1,
 ) {
@@ -60,20 +61,25 @@ export function drawMoodMetrix(
   ctx.scale(scale, scale);
   ctx.fillStyle = letter;
   for (const path of p.letters) ctx.fill(path);
-  ctx.fillStyle = accent;
-  if (Array.isArray(accentAlpha)) {
+  const accCol = (i: number) => (Array.isArray(accent) ? accent[i] ?? accent[0] : accent);
+  if (Array.isArray(accentAlpha) || Array.isArray(accent)) {
+    // 弧ごとに色/不透明度を割り当て（波紋グラデ連動・導入の点滅波紋）。
     const prev = ctx.globalAlpha;
     p.accent.forEach((path, i) => {
-      ctx.globalAlpha = prev * Math.max(0, Math.min(1, accentAlpha[i] ?? 1));
+      ctx.fillStyle = accCol(i);
+      const a = Array.isArray(accentAlpha) ? accentAlpha[i] ?? 1 : accentAlpha;
+      ctx.globalAlpha = prev * Math.max(0, Math.min(1, a));
       ctx.fill(path);
     });
     ctx.globalAlpha = prev;
   } else if (accentAlpha < 1) {
+    ctx.fillStyle = accent;
     const prev = ctx.globalAlpha;
     ctx.globalAlpha = prev * Math.max(0, accentAlpha);
     for (const path of p.accent) ctx.fill(path);
     ctx.globalAlpha = prev;
   } else {
+    ctx.fillStyle = accent;
     for (const path of p.accent) ctx.fill(path);
   }
   // ® は文字と同色（＝インク色）。背景に応じた白/黒を letter で受け取る。
@@ -87,15 +93,19 @@ export function moodMetrixSvg(
   x: number,
   y: number,
   scale: number,
-  accent: string,
+  accent: string | string[],
   letter = "#ffffff",
 ): string {
   const g = (arr: string[], fill: string) =>
     arr.map((d) => `<path d="${d}" fill="${fill}"/>`).join("");
+  // accent が配列なら弧ごとに個別 fill（[右内,右外,左内,左外]）、string なら従来どおり一律。
+  const gAccent = Array.isArray(accent)
+    ? ACCENT.map((d, i) => `<path d="${d}" fill="${accent[i] ?? accent[0]}"/>`).join("")
+    : g(ACCENT, accent);
   return (
     `<g transform="translate(${x.toFixed(2)} ${y.toFixed(2)}) scale(${scale.toFixed(4)})">` +
     g(LETTERS, letter) +
-    g(ACCENT, accent) +
+    gAccent +
     g(MARK, letter) +
     `</g>`
   );
