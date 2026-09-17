@@ -60,8 +60,11 @@ export interface LiquidGlassParams {
   dotColor2: string; // gradientの内側色（半径で dotColor へ補間）
   dotColor3: string; // 3色グラデ(gradient3)の中間色（内→中→外で補間）
   gradStart: number; // グラデ内側カラーの始点（-0.6..0.9・0=既定）。内→外の補間が起きる半径窓を動かす
+  gradLumaEven: number; // 内側カラーを外側カラーの明るさへ寄せる量（0..1・既定0.85）。0=内側カラーを指定値のまま出す
+  innerHide: number; // グラデ内側カラーの非表示（1で内側カラーを使わず外側カラーで代替）
   gradMid: number; // 3色グラデの中間色の位置（0..1・既定0.5）。gradient3 のみ有効
   innerBright: number; // 内側ドットの明るさ倍率（0..2・1=無変換）。穴側の明るさ
+  innerAlpha: number; // 内側ドットの不透明度（0..1・1=無変換）。外側へ向けて1へ補間
   outerBright: number; // 外側ドットの明るさ倍率（0..2・1=無変換）。外周の明るさ
   // 色味調整レイヤー（全ソース共通の後段色補正・既定は無変換＝呼び出し前と同一）
   toneHue: number; // 色相シフト（度・-180..180・0=無変換）
@@ -151,6 +154,10 @@ interface Dot {
 // 濃度均一化: 明るい内側(ティール)の知覚輝度を外側(バイオレット)へ GRAD_LUMA_EVEN 分だけ
 // 寄せる。RGB 等倍スケール＝色相・彩度(R:G:B比)は不変・明度のみ低下（k≤1 で増光/クリップなし）。
 // 基準を luma(outer) にするのでパレット差替でも自動追従。solid/blob は本関数を通らず不変。
+// この補償は「外側カラーの輝度」を基準にするため、暗い外側カラーほど内側カラーが
+// 強く暗転する＝外側カラー次第で内側が濁って見える原因になる（既定パレットでは
+// 内側 #17f0d9 が #0d8a7d へ、HSL 明度で -43%）。gradLumaEven でその量を可変にし、
+// 0 で内側カラーを指定値どおりに描ける。既定は 0.85 ＝ 従来値で出力は完全に不変。
 const GRAD_LUMA_EVEN = 0.85; // 0=無補償 … 1=内外を等輝度化（inner/outer≈1.0）
 const luma601 = (c: number[]) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
 // 背景明度ゲート: 黒(0)で前段式にバイト一致・白(1)で白背景向け補償をフル適用（両背景で成立）。
@@ -158,6 +165,10 @@ const bgWhiteness = (P: LiquidGlassParams) => clamp((luma601(rgbOf(P.bg)) / 255 
 // gradient(2色)/gradient3(3色) を「グラデーション経路」として共通に扱う（各 gate を集約）。
 // solid/blob は false ＝従来と完全に同じ経路を通る（バイト一致）。
 const isGradient = (P: LiquidGlassParams) => P.dotSource === "gradient" || P.dotSource === "gradient3";
+// グラデ内側カラーの実効値。非表示(innerHide)時は外側カラーで代替するので内→外の混色が
+// 消え、2色グラデは全面が外側カラーになる（gradient3 は 外→中間→外）。ドットの数/径/濃度や
+// armEven・edgeFade は一切通らないので形状と密度は不変。未設定時の dotColor フォールバックは従来どおり。
+const innerRgb = (P: LiquidGlassParams) => rgbOf((P.innerHide ? P.dotColor : P.dotColor2) || P.dotColor);
 // 白背景の濃度均一化: 高i(=帯中心=各辺の濃い芯)ほど色を白へ寄せ、overlap で暗くなりすぎる
 // 飽和天井(≈255-luma)を下げて芯の突出を抑える。色/luma 領域の補償なので motion2 の shade
 // (alpha 再増幅)に相殺されない＝白地の主レバー。黒背景は bgWhiteness=0 で完全に無効。
@@ -214,7 +225,8 @@ function gradientRgb(sr: number, i: number, inner: number[], mid: number[], oute
   const L0 = luma601(col);
   let out = col;
   if (L0 > 1) {
-    const k = Math.min(1, (L0 * (1 - GRAD_LUMA_EVEN) + luma601(outer) * GRAD_LUMA_EVEN) / L0);
+    const le = clamp(P.gradLumaEven ?? GRAD_LUMA_EVEN, 0, 1);
+    const k = Math.min(1, (L0 * (1 - le) + luma601(outer) * le) / L0);
     out = [col[0] * k, col[1] * k, col[2] * k];
   }
   const lift = CORE_LIFT_WHITE * bgWhiteness(P) * clamp(i, 0, 1);
@@ -291,6 +303,15 @@ function applyDotAppearance(col: number[], sr: number, P: LiquidGlassParams): nu
   }
   return applyTone(col, P);
 }
+
+// 内側ドットの不透明度(innerAlpha)。穴側だけ alpha を落とし、外側へ向けて 1 へ戻す。
+// 補間には radialT を使うので、内/外の明るさ(innerBright/outerBright)やグラデの色境界と
+// 同じ半径で切り替わる。色ではなく alpha を触るので、ドットの色・径・位置は一切変わらない。
+// 既定 1 は係数 1 の early return ＝ canvas / SVG / 導入アニメの全経路でバイト一致。
+const innerAlphaF = (sr: number, P: LiquidGlassParams) => {
+  const ia = P.innerAlpha ?? 1;
+  return ia === 1 ? 1 : ia + (1 - ia) * radialT(sr, P);
+};
 
 // per-dot 径係数(coverage)。gradient は白背景で floor を上げ faint を拡大し薄い辺を充填。
 // ピーク径(i=1)は 1.10 に固定＝各辺の芯サイズ・凝集は不変。黒背景は floor=0.66 で前段式にバイト一致。
@@ -513,7 +534,7 @@ function drawC3(
     const cellPx = spacingPx(P, u);
     const rimWidth = Math.max(cellPx * 2.5, hr * 0.08);
     const base = rgbOf(P.dotColor);
-    const base2 = rgbOf(P.dotColor2 || P.dotColor); // dotColor2 未設定時は dotColor へフォールバック
+    const base2 = innerRgb(P); // 内側カラー（非表示時は外側カラー／未設定時は dotColor）
     const base3 = rgbOf(P.dotColor3 || P.dotColor); // gradient3 の中間色。未設定時は dotColor
     // 発光(dotGlow): 有効時は透明レイヤ(DL)へ描き後段でぼかし加算＋鮮明な芯を等倍重ね。
     // 無効時は c へ直接＝中間レイヤ皆無で従来とバイト一致。glowPx は S=W/1280 でスケール。
@@ -553,7 +574,7 @@ function drawC3(
       }
       col = applyDotAppearance(col, dt.sr, P); // 内/外明るさ＋色味調整（既定は無変換）
       // edgeFade(alphaI 第3引数=dt.outer)と armEven(*dt.even) を alpha に同時適用（色/径/cull は不変）。
-      const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
+      const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha * innerAlphaF(dt.sr, P) * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
       if (a < (isGradient(P) && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
       tg.fillStyle = cstr(col, a);
       tg.beginPath();
@@ -601,8 +622,11 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   dotColor2: "#17f0d9", // 内側＝やや明るい cyan 寄り teal（Image #12 の内側発色）
   dotColor3: "#3d6bff", // 3色グラデ(gradient3)の中間色。既定 gradient では未使用
   gradStart: 0, // グラデ内側カラーの始点（0=従来どおり）
+  gradLumaEven: 0.85, // 内側→外側への明るさ追従（0.85=従来の固定値。0で内側カラーの濁りが消える）
+  innerHide: 0, // グラデ内側カラーの非表示（0=表示）
   gradMid: 0.5, // 3色グラデの中間色の位置（0..1）
   innerBright: 1, // 内側ドットの明るさ倍率（1=無変換）
+  innerAlpha: 1, // 内側ドットの不透明度（1=無変換）
   outerBright: 1, // 外側ドットの明るさ倍率（1=無変換）
   toneHue: 0, // 色味調整レイヤー: 既定は全て無変換＝既存の全出力とバイト一致
   toneSat: 1,
@@ -700,6 +724,8 @@ export const LIQUID_GLASS_CONTROLS: ControlsSpec = [
       ["dotColor", "カラー（単色／グラデ外側）", "k"],
       ["dotColor2", "グラデ内側カラー", "k"],
       ["gradStart", "グラデ内側カラーの始点", "r", -0.6, 0.9, 0.01, ""],
+      ["gradLumaEven", "外側カラーへの明るさ追従", "r", 0, 1, 0.01, ""],
+      ["innerHide", "グラデ内側カラーを非表示", "c"],
       ["dotAlpha", "ドットの不透明度", "r", 0, 1, 0.01, ""],
       ["dotBlur", "ドットのぼかし", "r", 0, 12, 0.1, "px"],
       ["dotGlow", "ドットの発光", "r", 0, 1, 0.01, ""],
@@ -715,6 +741,7 @@ export const LIQUID_GLASS_CONTROLS: ControlsSpec = [
     "見え方 / APPEARANCE",
     [
       ["innerBright", "内側の明るさ", "r", 0, 2, 0.01, "×"],
+      ["innerAlpha", "内側の不透明度", "r", 0, 1, 0.01, ""],
       ["outerBright", "外側の明るさ", "r", 0, 2, 0.01, "×"],
     ],
   ],
@@ -808,7 +835,7 @@ function liquidGlassShapes(
   const u = Math.min(W, H) * 0.395 * P.zoom * P.fieldScale;
   const cellPx = spacingPx(P, u);
   const base = rgbOf(P.dotColor);
-  const base2 = rgbOf(P.dotColor2 || P.dotColor); // dotColor2 未設定時は dotColor へフォールバック
+  const base2 = innerRgb(P); // 内側カラー（非表示時は外側カラー／未設定時は dotColor）
   const base3 = rgbOf(P.dotColor3 || P.dotColor); // gradient3 の中間色。未設定時は dotColor
   const rot = P.hexRot * RAD + ph * TAU * P.hexSpin;
   const hr = P.hexR * H * P.zoom;
@@ -837,7 +864,7 @@ function liquidGlassShapes(
       col = gradientRgb(dt.sr, dt.i, base2, base3, base, P);
     }
     col = applyDotAppearance(col, dt.sr, P); // 内/外明るさ＋色味調整（既定は無変換＝<circle fill> もバイト一致）
-    const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
+    const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha * innerAlphaF(dt.sr, P) * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
     if (a < (isGradient(P) && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
     const fill = rgbHex(col);
     const o = a.toFixed(3);
@@ -931,7 +958,7 @@ function drawIntroReveal(
   const hexDistance = hexagonDistance(hr, rot - Math.PI / 2);
   const rimWidth = Math.max(cellPx * 2.5, hr * 0.08);
   const base = rgbOf(P.dotColor);
-  const base2 = rgbOf(P.dotColor2 || P.dotColor); // dotColor2 未設定時は dotColor へフォールバック
+  const base2 = innerRgb(P); // 内側カラー（非表示時は外側カラー／未設定時は dotColor）
   const base3 = rgbOf(P.dotColor3 || P.dotColor); // gradient3 の中間色。未設定時は dotColor
   const cx = W / 2,
     cy = H / 2;
@@ -971,7 +998,7 @@ function drawIntroReveal(
     const weight = P.hexMask ? hexDotWeight(hexDistance(pxt - cx, pyt - cy), rimWidth) : 1;
     const rx = cellPx * 0.5 * P.dotScale * gradRadiusFactor(dt.i, P) * Math.sqrt(weight);
     if (rx < 0.1 * S) continue;
-    const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha, 0, 1) * a1; // 不透明度だけを上げる
+    const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha * innerAlphaF(dt.sr, P), 0, 1) * a1; // 不透明度だけを上げる
     if (a < (isGradient(P) && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
     // 色は drawC3 と一致させる（gradient は半径補間、それ以外は単色）＋色味調整レイヤー。
     // ＝A末端が pattern4 と厳密一致。blob は導入中は単色フォールバック。
