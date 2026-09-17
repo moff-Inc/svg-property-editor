@@ -28,6 +28,8 @@ export interface CanvasRenderer {
   toSvg?(o: { phase: number; loopSeconds: number; params: Params }): string;
   // 導入（出現）アニメの長さ（秒）。renderIntro を持つレンダラのみ設定。
   introSeconds?: number;
+  // パラメータで導入尺を調整するレンダラ向け。未実装時は introSeconds を使う。
+  getIntroSeconds?(params: Params): number;
   // 導入アニメの1フレーム。t01=導入進行(0..1), phase=通常ループ位相（連続させて渡す）。
   // t01=1 のフレームは render(phase) とピクセル一致すること（ループへ段差なく接続）。
   renderIntro?(

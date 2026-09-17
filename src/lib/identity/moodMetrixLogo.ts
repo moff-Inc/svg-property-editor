@@ -6,6 +6,15 @@
 export const LOGO_W = 315;
 export const LOGO_H = 122;
 
+export interface MoodMetrixAccentGradient {
+  kind: "mirrored-gradient";
+  inner: string;
+  middle: string;
+  outer: string;
+}
+
+export type MoodMetrixAccent = string | string[] | MoodMetrixAccentGradient;
+
 const LETTERS: string[] = [
   "M131.429 121.14V79.5599C131.429 77.8499 130.049 76.4699 128.339 76.4699H115.359V66.1699H159.199V76.4699H146.299C144.589 76.4699 143.209 77.8499 143.209 79.5599V121.14H131.419H131.429Z",
   "M196.74 121.14L186.82 103.05C186.28 102.06 185.24 101.44 184.11 101.44H180.46C178.75 101.44 177.37 102.82 177.37 104.53V121.14H165.67V66.1699H191.38C202.84 66.1699 209.84 73.6699 209.84 83.8899C209.84 94.1099 203.74 98.8099 197.81 100.21L210.17 121.14H196.74ZM189.65 76.2299H180.46C178.75 76.2299 177.37 77.6099 177.37 79.3199V88.2999C177.37 90.0099 178.75 91.3899 180.46 91.3899H189.65C194.35 91.3899 197.89 88.4199 197.89 83.8099C197.89 79.1999 194.35 76.2299 189.65 76.2299Z",
@@ -17,6 +26,20 @@ const LETTERS: string[] = [
   "M43.1098 1.13989L31.1998 31.7299C30.6898 33.0399 28.8298 33.0399 28.3198 31.7299L16.4098 1.13989H0.00976562V56.1099H11.7097V22.0099C11.7097 20.8699 13.2798 20.5699 13.6998 21.6299L26.4098 54.0799H33.1098L45.8198 21.6299C46.2398 20.5699 47.8098 20.8699 47.8098 22.0099V56.1099H59.5898V1.13989H43.1098Z",
   "M171.7 12.25C179.07 12.25 187.58 17.35 187.58 28.63C187.58 39.91 179.08 45 171.7 45C164.32 45 155.83 39.92 155.83 28.63C155.83 17.34 164.33 12.25 171.7 12.25ZM171.7 0C157.94 0 143.33 10.03 143.33 28.63C143.33 47.23 157.95 57.25 171.7 57.25C185.45 57.25 200.08 47.22 200.08 28.63C200.08 10.04 185.46 0 171.7 0Z",
   "M126.95 12.25C134.32 12.25 142.83 17.35 142.83 28.63C142.83 39.91 134.33 45 126.95 45C119.57 45 111.08 39.92 111.08 28.63C111.08 17.34 119.58 12.25 126.95 12.25ZM126.95 0C113.19 0 98.5801 10.03 98.5801 28.63C98.5801 47.23 113.2 57.25 126.95 57.25C140.7 57.25 155.33 47.22 155.33 28.63C155.33 10.04 140.71 0 126.95 0Z",
+];
+
+// LETTERS と同じ順序の各文字中心。導入時だけ、文字単位の出現スケールに使う。
+export const MOOD_METRIX_LETTER_CENTERS: readonly (readonly [number, number])[] = [
+  [137.3, 93.65],
+  [187.75, 93.65],
+  [224.52, 93.65],
+  [263.33, 93.65],
+  [29.8, 93.65],
+  [89.1, 93.65],
+  [264.45, 28.6],
+  [29.8, 28.6],
+  [171.7, 28.6],
+  [126.95, 28.6],
 ];
 
 const ACCENT: string[] = [
@@ -42,27 +65,70 @@ function paths() {
   return _cache;
 }
 
+const isAccentGradient = (accent: MoodMetrixAccent): accent is MoodMetrixAccentGradient =>
+  typeof accent === "object" && !Array.isArray(accent) && accent.kind === "mirrored-gradient";
+
+const addGradientStops = (
+  gradient: CanvasGradient,
+  start: string,
+  middle: string,
+  end: string,
+) => {
+  gradient.addColorStop(0, start);
+  gradient.addColorStop(0.5, middle);
+  gradient.addColorStop(1, end);
+};
+
 // canvas へ描画。(x,y) を左上、scale 倍、accent はアクセント色（「((」「))」）。
-// accent は string=全弧一律 / string[]=弧ごとの個別色（波紋グラデ連動用）。
+// accent は string=全弧一律 / string[]=弧ごとの個別色 / mirrored-gradient=左右対称の連続色。
 // accentAlpha はアクセントの不透明度。number=全パス一律（導入の点滅用、既定1）。
 // number[]=パスごと（波紋アニメ用）。ACCENT の順序は [右内, 右外, 左内, 左外]。
+// letterScales は文字ごとの一時スケール。省略時は全て1で通常描画と同一。
 export function drawMoodMetrix(
   ctx: CanvasRenderingContext2D,
   x: number,
   y: number,
   scale: number,
-  accent: string | string[],
+  accent: MoodMetrixAccent,
   letter = "#ffffff",
   accentAlpha: number | number[] = 1,
+  letterScales: readonly number[] = [],
 ) {
   const p = paths();
   ctx.save();
   ctx.translate(x, y);
   ctx.scale(scale, scale);
   ctx.fillStyle = letter;
-  for (const path of p.letters) ctx.fill(path);
-  const accCol = (i: number) => (Array.isArray(accent) ? accent[i] ?? accent[0] : accent);
-  if (Array.isArray(accentAlpha) || Array.isArray(accent)) {
+  p.letters.forEach((path, i) => {
+    const letterScale = Math.max(0, letterScales[i] ?? 1);
+    if (Math.abs(letterScale - 1) < 1e-6) {
+      ctx.fill(path);
+      return;
+    }
+    const [cx, cy] = MOOD_METRIX_LETTER_CENTERS[i];
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(letterScale, letterScale);
+    ctx.translate(-cx, -cy);
+    ctx.fill(path);
+    ctx.restore();
+  });
+  const solidAccent = typeof accent === "string" ? accent : "";
+  let gradientFills: [CanvasGradient, CanvasGradient] | null = null;
+  if (isAccentGradient(accent)) {
+    // 両側を1本の距離軸として扱う。左は外→内、右は内→外に反転するため、
+    // 弧ごとのベタ塗りではなく、参照画像どおり各弧の内部にもブルーの遷移が現れる。
+    const left = ctx.createLinearGradient(64, 0, 103, 0);
+    const right = ctx.createLinearGradient(196, 0, 231, 0);
+    addGradientStops(left, accent.outer, accent.middle, accent.inner);
+    addGradientStops(right, accent.inner, accent.middle, accent.outer);
+    gradientFills = [right, left];
+  }
+  const accCol = (i: number): string | CanvasGradient => {
+    if (gradientFills) return i < 2 ? gradientFills[0] : gradientFills[1];
+    return Array.isArray(accent) ? accent[i] ?? accent[0] : solidAccent;
+  };
+  if (Array.isArray(accentAlpha) || Array.isArray(accent) || gradientFills) {
     // 弧ごとに色/不透明度を割り当て（波紋グラデ連動・導入の点滅波紋）。
     const prev = ctx.globalAlpha;
     p.accent.forEach((path, i) => {
@@ -73,13 +139,13 @@ export function drawMoodMetrix(
     });
     ctx.globalAlpha = prev;
   } else if (accentAlpha < 1) {
-    ctx.fillStyle = accent;
+    ctx.fillStyle = solidAccent;
     const prev = ctx.globalAlpha;
     ctx.globalAlpha = prev * Math.max(0, accentAlpha);
     for (const path of p.accent) ctx.fill(path);
     ctx.globalAlpha = prev;
   } else {
-    ctx.fillStyle = accent;
+    ctx.fillStyle = solidAccent;
     for (const path of p.accent) ctx.fill(path);
   }
   // ® は文字と同色（＝インク色）。背景に応じた白/黒を letter で受け取る。
@@ -93,17 +159,38 @@ export function moodMetrixSvg(
   x: number,
   y: number,
   scale: number,
-  accent: string | string[],
+  accent: MoodMetrixAccent,
   letter = "#ffffff",
+  accentAlpha = 1,
 ): string {
   const g = (arr: string[], fill: string) =>
     arr.map((d) => `<path d="${d}" fill="${fill}"/>`).join("");
-  // accent が配列なら弧ごとに個別 fill（[右内,右外,左内,左外]）、string なら従来どおり一律。
-  const gAccent = Array.isArray(accent)
-    ? ACCENT.map((d, i) => `<path d="${d}" fill="${accent[i] ?? accent[0]}"/>`).join("")
-    : g(ACCENT, accent);
+  const alpha = Math.max(0, Math.min(1, accentAlpha));
+  const accentOpacity = alpha < 1 ? ` opacity="${Number(alpha.toFixed(4))}"` : "";
+  let accentDefs = "";
+  let gAccent: string;
+  if (isAccentGradient(accent)) {
+    accentDefs =
+      `<defs>` +
+      `<linearGradient id="mood-accent-left" gradientUnits="userSpaceOnUse" x1="64" y1="0" x2="103" y2="0">` +
+      `<stop offset="0" stop-color="${accent.outer}"/><stop offset="0.5" stop-color="${accent.middle}"/><stop offset="1" stop-color="${accent.inner}"/>` +
+      `</linearGradient>` +
+      `<linearGradient id="mood-accent-right" gradientUnits="userSpaceOnUse" x1="196" y1="0" x2="231" y2="0">` +
+      `<stop offset="0" stop-color="${accent.inner}"/><stop offset="0.5" stop-color="${accent.middle}"/><stop offset="1" stop-color="${accent.outer}"/>` +
+      `</linearGradient>` +
+      `</defs>`;
+    gAccent = ACCENT.map((d, i) =>
+      `<path d="${d}" fill="url(#mood-accent-${i < 2 ? "right" : "left"})"${accentOpacity}/>`,
+    ).join("");
+  } else {
+    // accent が配列なら弧ごとに個別 fill（[右内,右外,左内,左外]）、string なら従来どおり一律。
+    gAccent = Array.isArray(accent)
+      ? ACCENT.map((d, i) => `<path d="${d}" fill="${accent[i] ?? accent[0]}"${accentOpacity}/>`).join("")
+      : ACCENT.map((d) => `<path d="${d}" fill="${accent}"${accentOpacity}/>`).join("");
+  }
   return (
     `<g transform="translate(${x.toFixed(2)} ${y.toFixed(2)}) scale(${scale.toFixed(4)})">` +
+    accentDefs +
     g(LETTERS, letter) +
     gAccent +
     g(MARK, letter) +

@@ -6,10 +6,10 @@ import path from 'node:path';
 const sourceDir = path.resolve('src/lib/identity');
 const source = await readFile(path.join(sourceDir, 'liquidGlass.ts'), 'utf8');
 const result = await build({
-  stdin: { contents: source + '\nexport { dotField };', resolveDir: sourceDir, loader: 'ts' },
+  stdin: { contents: source + '\nexport { accentCycles, accentRipple, dotField, introGraphicParams, introTiming, motionDirection, wordmarkLetterScales, wordmarkRevealTiming };', resolveDir: sourceDir, loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm',
 });
-const { dotField, createLiquidGlass, LIQUID_GLASS_DEFAULTS } = await import(
+const { accentCycles, accentRipple, dotField, introGraphicParams, introTiming, motionDirection, wordmarkLetterScales, wordmarkRevealTiming, createLiquidGlass, LIQUID_GLASS_DEFAULTS } = await import(
   `data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 
 const params = { ...LIQUID_GLASS_DEFAULTS, wordmark: 0 }; // gradient source by default
@@ -17,12 +17,101 @@ const near = (a, b, t = 1e-9) => assert.ok(Math.abs(a - b) <= t, `${a} != ${b}`)
 const hue = (r, g, b) => { r /= 255; g /= 255; b /= 255; const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn; let h = 0; if (d > 1e-9) { if (mx === r) h = ((g - b) / d + (g < b ? 6 : 0)); else if (mx === g) h = ((b - r) / d + 2); else h = ((r - g) / d + 4); } return h * 60; };
 const sat = (r, g, b) => { const mx = Math.max(r, g, b), mn = Math.min(r, g, b); return mx === 0 ? 0 : (mx - mn) / mx; };
 
+assert.equal(LIQUID_GLASS_DEFAULTS.rippleCycles, 2, 'default ripple speed must be the slower 2 waves/loop');
+assert.equal(LIQUID_GLASS_DEFAULTS.accentAlpha, 1, 'accent opacity must default to fully visible');
+assert.equal(LIQUID_GLASS_DEFAULTS.introWordSeconds, 4.8);
+assert.equal(LIQUID_GLASS_DEFAULTS.introAccentSeconds, 3);
+assert.equal(accentCycles(LIQUID_GLASS_DEFAULTS), 1, 'accent must animate one cycle slower than the default graphic');
+assert.equal(accentCycles({ ...LIQUID_GLASS_DEFAULTS, rippleCycles: 3 }), 2);
+assert.equal(accentCycles({ ...LIQUID_GLASS_DEFAULTS, rippleCycles: 1 }), 1);
+
+// Intro-only graphic settings: mode 5, three cycles, and the opposite rotation direction.
+{
+  const intro = introGraphicParams(LIQUID_GLASS_DEFAULTS);
+  assert.equal(intro.motion, 5);
+  assert.equal(intro.rippleCycles, 3);
+  assert.equal(intro.animA, 3);
+  assert.equal(intro.animB, 3);
+  assert.equal(motionDirection(5), -1);
+  assert.equal(motionDirection(1), 1);
+
+  // The intro field remains seamless across a full phase cycle.
+  const start = dotField(intro, 0);
+  const settled = dotField(intro, 1);
+  start.forEach((dot, i) => {
+    for (const key of ['x', 'y', 'i', 'sr', 'ang', 'shade', 'even', 'swapRev']) {
+      near(dot[key], settled[i][key], 1e-6);
+    }
+  });
+}
+
+// Adjustable D/E durations change the real intro length.
+{
+  const timing = introTiming(LIQUID_GLASS_DEFAULTS);
+  assert.equal(timing.wordSeconds, 4.8);
+  assert.equal(timing.accentSeconds, 3);
+  assert.equal(timing.total, 17);
+  const custom = introTiming({ ...LIQUID_GLASS_DEFAULTS, introWordSeconds: 2.5, introAccentSeconds: 1.5 });
+  near(custom.total, 13.2);
+}
+
+// Intro section E finishes after exactly the second visible accent ripple and connects at alpha=1.
+{
+  let darkRuns = 0;
+  let wasDark = false;
+  for (let k = 0; k <= 1000; k++) {
+    const alpha = accentRipple(k / 1000)[0];
+    const dark = alpha < 0.5;
+    if (dark && !wasDark) darkRuns++;
+    wasDark = dark;
+  }
+  assert.equal(darkRuns, 2, 'intro accent must end after its second ripple');
+  assert.deepEqual(accentRipple(0), [1, 1, 1, 1]);
+  assert.deepEqual(accentRipple(1), [1, 1, 1, 1]);
+}
+
+// Reference text reveal: dim glyphs lead, bright glyphs follow, both finish without a jump.
+{
+  let previous = wordmarkRevealTiming(0);
+  assert.deepEqual(previous, { dim: 0, bright: 0 });
+  for (let k = 1; k <= 100; k++) {
+    const current = wordmarkRevealTiming(k / 100);
+    assert.ok(current.dim >= previous.dim && current.bright >= previous.bright, 'wordmark reveal must be monotonic');
+    assert.ok(current.dim + 1e-9 >= current.bright, 'dim precursor must lead the bright text');
+    previous = current;
+  }
+  assert.deepEqual(wordmarkRevealTiming(1), { dim: 1, bright: 1 });
+  const early = wordmarkRevealTiming(0.1);
+  assert.ok(early.dim > early.bright && early.dim > 0, 'dim text must appear before the bright pass');
+}
+
+// Each glyph briefly starts at 1.1x when its left-to-right reveal begins, then returns to 1x.
+{
+  assert.deepEqual(wordmarkLetterScales(0), Array(10).fill(1));
+  assert.deepEqual(wordmarkLetterScales(1), Array(10).fill(1));
+  const maxima = Array(10).fill(1);
+  let foundStaggeredFrame = false;
+  for (let k = 0; k <= 1000; k++) {
+    const scales = wordmarkLetterScales(k / 1000);
+    assert.equal(scales.length, 10);
+    scales.forEach((scale, i) => {
+      assert.ok(scale >= 1 && scale <= 1.100001, `letter ${i} scale out of range: ${scale}`);
+      maxima[i] = Math.max(maxima[i], scale);
+    });
+    const active = scales.filter(scale => scale > 1.001).length;
+    if (active > 0 && active < scales.length) foundStaggeredFrame = true;
+  }
+  assert.ok(maxima.every(scale => scale > 1.099), `every letter must reach 1.1x: ${maxima.join(', ')}`);
+  assert.ok(foundStaggeredFrame, 'letter pops must be staggered rather than scaling the whole wordmark');
+}
+
 // motion=5 CIRCULATES the gradient via a reversal weight (swapRev∈[0,1]): 0=正順(inner teal),
 // 1=反転(inner violet). Colour stays ON the teal→violet line, so no 3rd colour (green) appears.
 
-// 1. Geometry identical to standard; only swapRev (colour) and shade (opacity) are modulated.
+// 1. Geometry matches standard at the opposite phase: mode 5 keeps the same field while rotating
+// in the reverse direction; only swapRev (colour) and shade (opacity) are additionally modulated.
 for (const phase of [0, 0.2, 0.5, 0.75]) {
-  const std = dotField({ ...params, motion: 1 }, phase);
+  const std = dotField({ ...params, motion: 1 }, (1 - phase) % 1);
   const wave = dotField({ ...params, motion: 5 }, phase);
   assert.equal(std.length, wave.length);
   std.forEach((d, i) => { for (const k of ['x', 'y', 'i', 'sr', 'ang', 'even']) near(d[k], wave[i][k]); });
@@ -60,6 +149,16 @@ const midById = new Map(dotField({ ...params, motion: 5 }, 0.37).map(d => [d.id,
 let moved = 0, common = 0;
 for (const d of w0) { const m = midById.get(d.id); if (!m) continue; common++; if (Math.abs(d.swapRev - m.swapRev) > 0.1) moved++; }
 assert.ok(moved > common * 0.3, `circulation must animate: only ${moved}/${common} dots changed`);
+// 4b. Adjustable loop speed: 6 waves repeat after 1/6 loop, while 1 wave has only advanced 1/6.
+{
+  const stable = { ...params, animA: 0, animB: 0 };
+  const fast0 = dotField({ ...stable, rippleCycles: 6 }, 0);
+  const fastRepeat = dotField({ ...stable, rippleCycles: 6 }, 1 / 6);
+  fast0.forEach((d, i) => { near(d.swapRev, fastRepeat[i].swapRev, 1e-6); near(d.shade, fastRepeat[i].shade, 1e-6); });
+  const slow = dotField({ ...stable, rippleCycles: 1 }, 1 / 6);
+  const changed = fast0.filter((d, i) => Math.abs(d.swapRev - slow[i].swapRev) > 0.1).length;
+  assert.ok(changed > fast0.length * 0.4, `1 wave/loop must be slower than 6 waves/loop: ${changed}/${fast0.length}`);
+}
 // 5. Seamless loop + deterministic seek.
 const loopA = dotField({ ...params, motion: 5 }, 0), loopB = dotField({ ...params, motion: 5 }, 1);
 loopA.forEach((d, i) => { for (const k of ['x', 'y', 'i', 'sr', 'ang', 'shade', 'even', 'swapRev']) near(d[k], loopB[i][k], 1e-6); });
@@ -71,11 +170,16 @@ assert.deepEqual(dotField({ ...params, motion: 5 }, 0.317), at);
 const contexts = [];
 function context() {
   const ctx = {
-    dots: [], fillStyle: '', globalAlpha: 1,
-    save() {}, restore() {}, setTransform() {}, scale() {},
+    dots: [], gradients: [], fillStyle: '', globalAlpha: 1,
+    save() {}, restore() {}, setTransform() {}, scale() {}, translate() {},
     clearRect() { this.dots = []; }, fillRect() {},
     beginPath() {}, moveTo() {}, lineTo() {}, closePath() {}, fill() {}, drawImage() {},
-    createRadialGradient() { return { addColorStop() {} }; }, createLinearGradient() { return { addColorStop() {} }; },
+    createRadialGradient() { return { addColorStop() {} }; },
+    createLinearGradient(x0, y0, x1, y1) {
+      const gradient = { x0, y0, x1, y1, stops: [] };
+      this.gradients.push(gradient);
+      return { addColorStop(offset, color) { gradient.stops.push([offset, color.toLowerCase()]); } };
+    },
     getImageData(_x, _y, w, h) { return { data: new Uint8ClampedArray(w * h * 4) }; },
     arc(x, y, rx) { this.ellipse(x, y, rx, rx, 0); },
     ellipse(x, y, rx, ry, angle) { const rgba = this.fillStyle.match(/[\d.]+/g).map(Number); this.dots.push({ x, y, color: rgba.slice(0, 3), opacity: rgba[3] }); },
@@ -83,13 +187,29 @@ function context() {
   contexts.push(ctx); return ctx;
 }
 globalThis.document = { createElement() { return { width: 0, height: 0, getContext: () => context() }; } };
+globalThis.Path2D = class Path2D {};
 const renderer = createLiquidGlass(), canvas = context();
+assert.equal(renderer.getIntroSeconds(LIQUID_GLASS_DEFAULTS), 17);
+near(renderer.getIntroSeconds({ ...LIQUID_GLASS_DEFAULTS, introWordSeconds: 2.5, introAccentSeconds: 1.5 }), 13.2);
 function render(p, phase, size = 720) { for (const c of contexts) c.dots = []; renderer.render(canvas, size, size, phase, p); return contexts.flatMap(c => c.dots); }
 const flat = { ...params, dotGlow: 0, dotBlur: 0 };
 const key = d => `${d.x.toFixed(2)},${d.y.toFixed(2)}`;
+
+// Exercise the three edited intro regions with the Canvas path: A=initial mode 5, B=fade-out,
+// D=two-layer wordmark reveal. This is a low-cost runtime guard, not a visual approval.
+for (const t01 of [0.15, 0.35, 0.65]) {
+  renderer.renderIntro(canvas, 720, 720, t01, 0.2, { ...flat, wordmark: 1, introPattern: 1 });
+}
+const introGradients = contexts.flatMap(c => c.gradients);
+assert.ok(introGradients.some(g => g.x0 === 64 && g.x1 === 103), 'intro wordmark must render its mirrored colour gradient');
+const introMasks = introGradients.filter(g => g.x0 !== 64 && g.x0 !== 196);
+assert.ok(introMasks.length >= 2, 'intro wordmark must render dim and bright reveal masks');
+const introMaskWidths = introMasks.map(g => Math.abs(g.x1 - g.x0));
+assert.ok(Math.max(...introMaskWidths) > Math.min(...introMaskWidths) * 3,
+  'dim precursor must use a much longer alpha gradient than the bright pass');
 // Swap recolours a band of dots vs standard, AND never introduces a 3rd colour: every saturated
 // dot hue stays within the teal(≈174°)→violet(≈264°) gradient range — no green (hue<170).
-const std = render({ ...flat, motion: 1 }, 0.25);
+const std = render({ ...flat, motion: 1 }, 0.75);
 const wave = render({ ...flat, motion: 5 }, 0.25);
 const stdByPos = new Map(std.map(d => [key(d), d]));
 let recoloured = 0, matched = 0, greenDots = 0, outOfRange = 0;
@@ -119,35 +239,91 @@ for (const phase of [0, 0.125, 0.5, 0.875]) {
   cases++;
 }
 
-// ── Accent: motion=5 uses ONLY the two base colours, and they swap ───────
+// ── Accent: smoothly moving mirrored spatial gradient ────────────────────
 const withWord = { ...params, wordmark: 1 };
-function accentFills(p, phase) {
+function accentFills(svg) {
+  return [...svg.matchAll(/<path d="[^"]*" fill="(url\(#[^)]+\)|#[^"]+)"(?: opacity="[^"]+")?\/>/g)]
+    .map(m => m[1].toLowerCase()).filter(f => f !== '#000000');
+}
+function gradientStops(svg, id) {
+  const body = svg.match(new RegExp(`<linearGradient id="${id}"[^>]*>(.*?)<\\/linearGradient>`))?.[1] ?? '';
+  return [...body.matchAll(/<stop offset="([^"]+)" stop-color="([^"]+)"\/>/g)]
+    .map(([, offset, color]) => [+offset, color.toLowerCase()]);
+}
+function accentState(p, phase) {
   const svg = renderer.toSvg({ params: p, phase, loopSeconds: 12 });
-  return [...svg.matchAll(/<path d="[^"]*" fill="([^"]*)"\/>/g)].map(m => m[1].toLowerCase()).filter(f => f !== '#000000');
+  return {
+    fills: accentFills(svg),
+    left: gradientStops(svg, 'mood-accent-left'),
+    right: gradientStops(svg, 'mood-accent-right'),
+  };
 }
-for (const motion of [1, 2, 3]) {
-  const f = accentFills({ ...withWord, motion }, 0.3);
-  assert.equal(f.length, 4);
-  assert.ok(f.every(c => c === f[0]), `motion ${motion} accent must stay single-colour`);
+for (const motion of [1, 2, 3, 4, 5]) {
+  const start = accentState({ ...withWord, motion }, 0);
+  const { fills, left, right } = accentState({ ...withWord, motion }, 0.125);
+  const end = accentState({ ...withWord, motion }, 1);
+  assert.deepEqual(fills, ['url(#mood-accent-right)', 'url(#mood-accent-right)', 'url(#mood-accent-left)', 'url(#mood-accent-left)']);
+  assert.equal(left.length, 3, `motion ${motion} left accent must have 3 gradient stops`);
+  assert.equal(right.length, 3, `motion ${motion} right accent must have 3 gradient stops`);
+  assert.notDeepEqual(start.left, left, `motion ${motion} accent must animate continuously`);
+  assert.deepEqual(start.left, end.left, `motion ${motion} accent must loop seamlessly`);
 }
-const TEAL = '#17f0d9', VIOLET = '#6a2bff';
-// Accent invariant: at EVERY phase the two arcs are complementary (one teal, one violet) — the
-// "same colour on both arcs" state must never occur — and both arrangements are visited (it swaps).
-const seenArr = new Set();
-for (let k = 0; k <= 48; k++) {
-  const phase = k / 48;
-  const f = accentFills({ ...withWord, motion: 5 }, phase);
-  assert.equal(f.length, 4);
-  assert.ok(f.every(c => c === TEAL || c === VIOLET), `accent must be ONLY the 2 base colours, got ${f}`);
-  assert.equal(f[0], f[2], 'inner arcs symmetric');
-  assert.equal(f[1], f[3], 'outer arcs symmetric');
-  assert.notEqual(f[0], f[1], `inner and outer arcs must never be the same colour (phase ${phase.toFixed(3)}: ${f})`);
-  seenArr.add(f[0] + '|' + f[1]);
+for (const dotSource of ['solid', 'blob', 'gradient', 'gradient3']) {
+  const start = accentState({ ...withWord, dotSource }, 0);
+  const moved = accentState({ ...withWord, dotSource }, 0.125);
+  assert.notDeepEqual(start.left, moved.left, `${dotSource} accent must stay animated`);
 }
-assert.ok(seenArr.has(`${TEAL}|${VIOLET}`) && seenArr.has(`${VIOLET}|${TEAL}`),
-  `accent must repeat BOTH 2-colour arrangements, saw ${[...seenArr]}`);
-// inflow=0 → static rest: inner teal / outer violet.
-const rest = accentFills({ ...withWord, motion: 5, inflow: 0 }, 0.3);
-assert.deepEqual(rest, [TEAL, VIOLET, TEAL, VIOLET], 'inflow=0 → inner teal / outer violet');
+const BLUE = '#3d6bff';
+const rgb = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+const colourDelta = (a, b) => Math.max(...rgb(a).map((v, i) => Math.abs(v - rgb(b)[i])));
+// Every phase keeps a continuous outer↔middle↔inner gradient. Fine-grained adjacent samples must
+// move by only a few RGB values; this catches the former boolean direction flip as a large jump.
+const seenOuter = new Set();
+let previousLeft = null;
+let maxAccentStep = 0;
+for (let k = 0; k <= 240; k++) {
+  const phase = k / 240;
+  const { fills, left, right } = accentState({ ...withWord, motion: 5 }, phase);
+  assert.deepEqual(fills, ['url(#mood-accent-right)', 'url(#mood-accent-right)', 'url(#mood-accent-left)', 'url(#mood-accent-left)']);
+  assert.deepEqual(left.map(s => s[0]), [0, 0.5, 1]);
+  assert.deepEqual(right.map(s => s[0]), [0, 0.5, 1]);
+  assert.deepEqual(left.map(s => s[1]), [...right].reverse().map(s => s[1]), `left/right gradients must mirror at phase ${phase.toFixed(3)}`);
+  assert.equal(left[1][1], BLUE, 'gradient midpoint must stay blue');
+  if (previousLeft) {
+    maxAccentStep = Math.max(
+      maxAccentStep,
+      colourDelta(previousLeft[0][1], left[0][1]),
+      colourDelta(previousLeft[2][1], left[2][1]),
+    );
+  }
+  previousLeft = left;
+  seenOuter.add(left[0][1]);
+}
+assert.ok(seenOuter.size > 40, `accent must move through many intermediate colours, saw ${seenOuter.size}`);
+assert.ok(maxAccentStep <= 7, `accent motion must not jump between frames, max RGB step=${maxAccentStep}`);
+const seamA = accentState({ ...withWord, motion: 5 }, 0);
+const seamB = accentState({ ...withWord, motion: 5 }, 1);
+assert.deepEqual(seamA.left, seamB.left, 'accent gradient must loop seamlessly');
+assert.deepEqual(seamA.right, seamB.right, 'mirrored accent gradient must loop seamlessly');
+// Accent animation is independent of inflow: turning the graphic wave off must not stop the logo.
+const noInflow = accentState({ ...withWord, motion: 5, inflow: 0 }, 0.3);
+const fullInflow = accentState({ ...withWord, motion: 5, inflow: 2 }, 0.3);
+assert.deepEqual(noInflow.left, fullInflow.left);
+assert.deepEqual(noInflow.right, fullInflow.right);
 
-console.log(`PASS: motion=5 swaps teal↔violet on the gradient line (recoloured ${recoloured}/${matched}, green dots ${greenDots}, out-of-range ${outOfRange}), radial & seamless, ${cases} Canvas/SVG parity; accent = complementary 2-colour ripple (never same colour, both arrangements ${[...seenArr].length})`);
+// SVG export carries the adjustable accent opacity on all four accent paths.
+const fadedSvg = renderer.toSvg({ params: { ...withWord, accentAlpha: 0.35 }, phase: 0.3, loopSeconds: 12 });
+const fadedAccent = [...fadedSvg.matchAll(/fill="url\(#mood-accent-(?:left|right)\)" opacity="([^"]+)"/g)];
+assert.equal(fadedAccent.length, 4);
+assert.ok(fadedAccent.every(([, alpha]) => +alpha === 0.35));
+
+// Canvas uses the same local-space axes/stops as SVG, so the colour transition continues through
+// both arcs on each side instead of restarting inside each individual path.
+canvas.gradients = [];
+render({ ...flat, wordmark: 1, motion: 5, inflow: 0 }, 0.3);
+const logoGradients = canvas.gradients.filter(g => (g.x0 === 64 && g.x1 === 103) || (g.x0 === 196 && g.x1 === 231));
+assert.equal(logoGradients.length, 2);
+assert.deepEqual(logoGradients.find(g => g.x0 === 64).stops, noInflow.left);
+assert.deepEqual(logoGradients.find(g => g.x0 === 196).stops, noInflow.right);
+
+console.log(`PASS: adjustable word/accent intro durations, continuously moving intro graphic, ripple 2, and per-letter 1.1x reveal; graphic motion=5 swaps teal↔violet on the gradient line (recoloured ${recoloured}/${matched}, green dots ${greenDots}, out-of-range ${outOfRange}), radial & seamless, ${cases} Canvas/SVG parity; accent = slower always-on smooth mirrored gradient across every mode/source (${seenOuter.size} colours, max RGB step ${maxAccentStep}, adjustable opacity)`);

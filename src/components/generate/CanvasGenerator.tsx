@@ -29,6 +29,10 @@ function fill(num: number, min: number, max: number): CSSProperties {
   return { "--fill": `${Math.max(0, Math.min(100, pct))}%` } as CSSProperties;
 }
 
+function getIntroSeconds(renderer: CanvasRenderer | null | undefined, params: Params): number {
+  return renderer?.getIntroSeconds?.(params) ?? renderer?.introSeconds ?? 0;
+}
+
 export default function CanvasGenerator({
   slug,
   initial,
@@ -133,7 +137,7 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
       raf = requestAnimationFrame(tick);
       if (exportingRef.current) return;
       const r = rendererRef.current;
-      const introSecs = r?.introSeconds ?? 0;
+      const introSecs = getIntroSeconds(r, paramsRef.current);
       if (playingRef.current) {
         phaseRef.current = (phaseRef.current + dt / loopRef.current) % 1;
         if (introActiveRef.current) {
@@ -143,7 +147,14 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
       }
       const inIntro = introActiveRef.current && !!r?.renderIntro && introSecs > 0;
       if (inIntro && r?.renderIntro) {
-        r.renderIntro(ctx, canvas.width, canvas.height, introElapsedRef.current / introSecs, phaseRef.current, paramsRef.current);
+        r.renderIntro(
+          ctx,
+          canvas.width,
+          canvas.height,
+          introElapsedRef.current / introSecs,
+          phaseRef.current,
+          paramsRef.current,
+        );
       } else if (r) {
         r.render(ctx, canvas.width, canvas.height, phaseRef.current, paramsRef.current);
       }
@@ -178,7 +189,7 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
   // 導入（出現）アニメを頭から再生し、そのまま通常ループへ接続する。
   function playIntro() {
     const r = rendererRef.current;
-    if (!r?.renderIntro || !r.introSeconds) return;
+    if (!r?.renderIntro || getIntroSeconds(r, paramsRef.current) <= 0) return;
     introElapsedRef.current = 0;
     introActiveRef.current = true;
     phaseRef.current = 0;
@@ -237,11 +248,12 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
     exportingRef.current = true;
     try {
       const r = active.create();
+      const introSecs = getIntroSeconds(r, paramsRef.current);
       // 導入アニメ ON（intro=1 かつ対応レンダラ）のときは動画先頭に一度含める。
       const introOn =
         Boolean((paramsRef.current as Record<string, unknown>).intro) &&
         !!r.renderIntro &&
-        !!r.introSeconds;
+        introSecs > 0;
       await exportCanvasMp4({
         paint: (ctx, W, H, phase) => r.render(ctx, W, H, phase, paramsRef.current),
         width: EXPORT_W,
@@ -251,7 +263,7 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
         bitrateMbps,
         name: `identity_${content.no}_${mode}`,
         onProgress: (d, t) => setMp4Pct(Math.round((d / t) * 100)),
-        introSeconds: introOn ? r.introSeconds : undefined,
+        introSeconds: introOn ? introSecs : undefined,
         paintIntro:
           introOn && r.renderIntro
             ? (ctx, W, H, t01, phase) => r.renderIntro!(ctx, W, H, t01, phase, paramsRef.current)
