@@ -59,7 +59,7 @@ export interface LiquidGlassParams {
   dotColor: string; // solid色／gradientの外側色（＋ワードマークのアクセント色）
   dotColor2: string; // gradientの内側色（半径で dotColor へ補間）
   dotColor3: string; // 3色グラデ(gradient3)の中間色（内→中→外で補間）
-  gradStart: number; // グラデ内側カラーの始点（-0.6..0.9・0=既定）。+で内側色を外へ広げ、-で内側色を削る
+  gradStart: number; // グラデ内側カラーの始点（-0.6..0.9・0=既定）。内→外の補間が起きる半径窓を動かす
   gradMid: number; // 3色グラデの中間色の位置（0..1・既定0.5）。gradient3 のみ有効
   innerBright: number; // 内側ドットの明るさ倍率（0..2・1=無変換）。穴側の明るさ
   outerBright: number; // 外側ドットの明るさ倍率（0..2・1=無変換）。外周の明るさ
@@ -162,14 +162,36 @@ const isGradient = (P: LiquidGlassParams) => P.dotSource === "gradient" || P.dot
 // 飽和天井(≈255-luma)を下げて芯の突出を抑える。色/luma 領域の補償なので motion2 の shade
 // (alpha 再増幅)に相殺されない＝白地の主レバー。黒背景は bgWhiteness=0 で完全に無効。
 const CORE_LIFT_WHITE = 0.15; // 0=無効 … 白地で芯を白へ寄せる強度（推奨0.08–0.20。過大で芯が白抜け）
+// 内側カラーの始点(gradStart): 内→外の補間が起きる半径窓 [w0,w1] そのものを動かす。
+// t を clamp((t-gs)/(1-gs)) のように「t空間」で切ると、smoothstep の傾きが非0の点で
+// プラトーが終わるため立ち上がりに折れ(C1不連続)が出て輪郭線状のリングに見え、さらに
+// 傾きが 1/(1-gs) 倍に圧縮されて2トーンの境界になる。半径窓ごと動かせば両端の傾きは
+// smoothstep のまま0＝内側純色からの離陸も外側色への着地も滑らかに繋がる。
+//
+// 端点は固定オフセットではなくリング形状(thickness/fieldBlur)から引いた目標へ寄せる。
+// 目標をリング帯の内側に取るのが要点で、外側端を「ドットが見える限界」まで飛ばすと
+// 混色の終端が薄いスカートに逃げ、外側カラーが濃いドットに乗らず痩せて見える
+// （既定値で濃度 0.12 まで低下）。下の目標なら窓全域で濃度 0.77 以上を保つ。
+//   ・近端(near) = ringR ± thickness/4  … 芯の肩の手前。ここまでが始点側の純色
+//   ・遠端(far)  = ringR ± (thickness/2 + fieldBlur) … 濃いドットが残る縁
+// +方向は [near, far] が外側へ、-方向は内側へ動く（順序が反転しないよう左右を入替）。
+// gs=0 は early return で前段の式そのもの＝solid/blob 同様に全出力バイト一致。
+const GRAD_WIN_MIN = 0.22; // 混色区間の最小幅。どの ringR/thickness でもハードエッジ化させない
+function gradWindow(P: LiquidGlassParams): [number, number] {
+  const w0 = P.ringR - 0.28, w1 = P.ringR + 0.28;
+  const gs = isGradient(P) ? clamp(P.gradStart ?? 0, -0.6, 0.9) : 0; // solid/blob では無意味
+  if (gs === 0) return [w0, w1]; // 前段一致
+  const half = P.thickness / 2;
+  const near = half / 2, far = half + Math.max(0.02, P.fieldBlur);
+  const u = gs > 0 ? gs / 0.9 : gs / -0.6; // 各方向の振り切りで 1
+  const t0 = P.ringR + (gs > 0 ? near : -far); // 窓の内側端の目標
+  const t1 = P.ringR + (gs > 0 ? far : -near); // 窓の外側端の目標
+  const s0 = w0 + (t0 - w0) * u, s1 = w1 + (t1 - w1) * u;
+  return s1 - s0 >= GRAD_WIN_MIN ? [s0, s1] : [s0, s0 + GRAD_WIN_MIN];
+}
 function gradientRgb(sr: number, i: number, inner: number[], mid: number[], outer: number[], P: LiquidGlassParams): number[] {
-  // 内側カラーの始点(gradStart): 補間係数 t を [gs,1]→[0,1] へ再マップする。
-  // gs>0 = 内側色が純色のまま外へ広がり、混色の開始が遅れる（内側カラーの面積↑）。
-  // gs<0 = 中心でも既に外側色が混ざった状態から始まる（内側カラーの純色域が消える）。
-  // gs=0 で t は前段と同一式＝solid/blob と同じく全出力バイト一致。2色/3色グラデ共通に効く。
-  const t0 = smoothstep(P.ringR - 0.28, P.ringR + 0.28, sr);
-  const gs = clamp(P.gradStart ?? 0, -0.6, 0.9);
-  const t = gs === 0 ? t0 : clamp((t0 - gs) / (1 - gs), 0, 1);
+  const [w0, w1] = gradWindow(P);
+  const t = smoothstep(w0, w1, sr);
   // 2色(gradient): inner→outer を t で線形補間（前段と同一式＝バイト一致）。
   // 3色(gradient3): inner→mid→outer を中間色位置 gradMid で2区間に分けて補間。
   let col: number[];
@@ -253,8 +275,12 @@ function toneActive(P: LiquidGlassParams): boolean {
   return (P.toneHue || 0) !== 0 || (P.toneSat ?? 1) !== 1 || (P.toneBright ?? 1) !== 1 || (P.toneTint || 0) !== 0;
 }
 
-// ドットの半径位置（穴側0→外周1）。内/外の明るさ配分に使う。
-const radialT = (sr: number, P: LiquidGlassParams) => smoothstep(P.ringR - 0.28, P.ringR + 0.28, sr);
+// ドットの半径位置（穴側0→外周1）。内/外の明るさ配分に使う。gradientRgb と同じ窓を
+// 使うので、始点(gradStart)を動かしても色の境界と innerBright/outerBright の境界がずれない。
+const radialT = (sr: number, P: LiquidGlassParams) => {
+  const [w0, w1] = gradWindow(P);
+  return smoothstep(w0, w1, sr);
+};
 // ドット最終色への統合後段: ①内/外の明るさ（半径で innerBright→outerBright を補間しRGBへ乗算）
 // ②色味調整レイヤー。既定(inner/outer=1, tone無変換)は入力配列をそのまま返す＝バイト一致。
 function applyDotAppearance(col: number[], sr: number, P: LiquidGlassParams): number[] {
