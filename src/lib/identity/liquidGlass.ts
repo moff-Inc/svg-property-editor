@@ -150,7 +150,7 @@ interface Dot {
   shade: number; // 吸い込みの陰影／グラデ反転波の透明度脈動（不透明度係数、標準は1）
   outer: number; // 帯縁(ringR±thickness/2)より外側の距離（0=帯内/内側）。外周フェード用・位置とは無関係
   even: number; // アーム密度均一化の alpha 係数（標準=1・gradient時のみ≠1）
-  tShift: number; // グラデ反転波(motion=5)のグラデ位置シフト（0=標準・teal↔violet を線上で入替）
+  swapRev: number; // グラデ反転波(motion=5)の反転量（0=正順[内teal] … 1=反転[内violet]・完全循環）
 }
 
 // グラデーション配色（Image #8）: 内側(inner=dotColor2)→外側(outer=dotColor)を
@@ -204,11 +204,13 @@ function gradWindow(P: LiquidGlassParams): [number, number] {
   const s0 = w0 + (t0 - w0) * u, s1 = w1 + (t1 - w1) * u;
   return s1 - s0 >= GRAD_WIN_MIN ? [s0, s1] : [s0, s0 + GRAD_WIN_MIN];
 }
-// tBias: グラデ位置 t を ±方向へずらす（motion=5 の色リップル用）。0=従来どおり＝バイト一致。
-// 色は必ず inner→outer グラデ「線上」を動くため、青/緑など第3色は増えない（同じ色域のまま位置だけ移動）。
-function gradientRgb(sr: number, i: number, inner: number[], mid: number[], outer: number[], P: LiquidGlassParams, tBias = 0): number[] {
+// rev: グラデを反転させる量（motion=5 の色循環用）。0=正順(inner→outer)＝従来どおりバイト一致、
+// 1=反転(outer→inner・内側が外色 violet)、0.5=一様中間。t = bt·(1−2·rev)+rev は bt に対して線形なので
+// t(sr) は基本グラデと同じ単調性を保ち（バンド化しにくい）、色は必ずグラデ線上＝第3色(緑)は増えない。
+function gradientRgb(sr: number, i: number, inner: number[], mid: number[], outer: number[], P: LiquidGlassParams, rev = 0): number[] {
   const [w0, w1] = gradWindow(P);
-  const t = tBias === 0 ? smoothstep(w0, w1, sr) : clamp(smoothstep(w0, w1, sr) + tBias, 0, 1);
+  const bt = smoothstep(w0, w1, sr);
+  const t = rev === 0 ? bt : clamp(bt * (1 - 2 * rev) + rev, 0, 1);
   // 2色(gradient): inner→outer を t で線形補間（前段と同一式＝バイト一致）。
   // 3色(gradient3): inner→mid→outer を中間色位置 gradMid で2区間に分けて補間。
   let col: number[];
@@ -399,10 +401,15 @@ function applyArmEven(out: Dot[], P: LiquidGlassParams) {
   }
 }
 
-// グラデ反転波(motion=5)のグラデ位置シフト振幅。大きいほど teal↔violet の入替が強い。
-// 0.5 で t=0.5 の帯中心が 0..1 を往復＝teal と violet が明確に入れ替わる。内側(t≈0)/外側(t≈1)は
-// クランプで teal/violet 側へ留まりやすく、内外の傾向を保ちつつ中間帯がリング状に入替わる。
-const SWAP_T_AMPLITUDE = 0.5;
+// 共有リップル時計（グラフィックの色循環/透明度とアクセントの点滅を同期）。位相は sin(TAU·CYCLES·ph − K·sr)：
+// −K·sr で外向き伝播、TAU·CYCLES·ph の整数周期でループ継ぎ目なし。CYCLES=6 は loopSeconds=5 で
+// 約0.83s/脈動＝参照一致（12s既定なら約2s/脈動）。K は反転(循環)が半径方向に伝播する波数：小さいほど
+// 環が広く滑らか、大きいほど反転境界が増えてバンド化しやすい。反転は gradientRgb 側で線形ミックス
+// （t=bt·(1−2rev)+rev）なので t は単調のままバンド化しにくいが、K を上げ過ぎると反転境界でパキッと割れる。
+const SWAP_RIPPLE_CYCLES = 6; // 1ループの波紋脈動数（整数＝継ぎ目なし）
+const SWAP_RIPPLE_K = 3; // 反転(循環)の半径伝播波数（小さいほど滑らか）
+const SWAP_SHADE_AMP = 0.45; // 透明度脈動（チカチカ）の振幅。参照の明滅比に合わせやや強め
+const ripplePhase = (sr: number, ph: number) => Math.sin(TAU * SWAP_RIPPLE_CYCLES * ph - SWAP_RIPPLE_K * sr); // 半径波 [-1,1]
 
 function dotField(P: LiquidGlassParams, ph: number): Dot[] {
   const count = Math.max(17, Math.round(P.density));
@@ -481,21 +488,21 @@ function dotField(P: LiquidGlassParams, ph: number): Dot[] {
         // 濃度均一化(gradient): 螺旋ハイライトの振幅を弱め帯中心の突出を抑える（意匠は維持）。
         shade = 1 + (isGradient(P) ? 0.3 : 0.7) * P.inflow * wavePhase * inten;
       }
-      // グラデ反転波(motion=5): 位置・形は標準のまま、色は teal→violet グラデの「位置 t」を
-      // 半径波でシフト(tShift)して波紋状に入れ替える。tShift は同心円(角度非依存, -sr*8)で
-      // 中心→外へ伝播。色は必ずグラデ線上を動くので青/緑の第3色は増えない（内側teal/外側violet
-      // の傾向も保持）。透明度(shade)も同位相で脈動＝リングが外へ発散。
-      // TAU*2*ph の整数周期でループ継ぎ目なし。inflow を振幅(0..1へクランプ)として共用＝0で無効。
-      // 他モーションは tShift=0/shade=1 で従来出力とバイト一致。
-      let tShift = 0;
+      // グラデ反転波(motion=5): 位置・形は標準のまま、色は teal→violet グラデを反転量 swapRev で
+      // 循環させる。swapRev=amp·(0.5+0.5·ripplePhase) は半径波で 0（正順=内teal）↔ amp（反転=内violet）を
+      // 往復＝内側に外色 violet が来る瞬間があり完全循環。中心→外へ広がる同心円（角度非依存）＝
+      // 循環が内外へ伝播。色は必ずグラデ線上（第3色=緑なし）。透明度(shade)も同位相で脈動＝発散・チカチカ。
+      // inflow を振幅(0..1へクランプ)として共用＝amp→0 で正順静止（swapRev→0）。他モーションは
+      // swapRev=0/shade=1 でバイト一致。アクセントも同じ ripplePhase で同期。
+      let swapRev = 0;
       if (P.motion === 5 && P.inflow > 0) {
         const amp = clamp(P.inflow, 0, 1);
-        const s = Math.sin(TAU * 2 * ph - sr * 8); // 半径波 [-1,1]（角度非依存＝同心円）
-        tShift = SWAP_T_AMPLITUDE * amp * s; // グラデ位置を ±SWAP_T_AMPLITUDE 揺らして teal↔violet を入替
-        shade = 1 + 0.35 * amp * s; // 平均≈1・±0.35·amp のアルファ脈動（発散）
+        const s = ripplePhase(sr, ph); // 共有リップル波 [-1,1]（同心円・外向き伝播）
+        swapRev = amp * (0.5 + 0.5 * s); // 0..amp：0=正順(内teal) … amp=反転(内violet)＝循環
+        shade = 1 + SWAP_SHADE_AMP * amp * s; // 平均≈1 のアルファ脈動（発散・チカチカ）
       }
       // outer: 帯縁より外側のみ dOut（既存 sr/ringR/dOut を読むだけ・位置へ書戻さない）。内側/穴側は0。
-      out.push({ id: row * count + col, x: rx0, y: ry0, i: inten, ang: wa + Math.PI / 2 + rotation, sr, shade, outer: sr > ringR ? dOut : 0, even: 1, tShift });
+      out.push({ id: row * count + col, x: rx0, y: ry0, i: inten, ang: wa + Math.PI / 2 + rotation, sr, shade, outer: sr > ringR ? dOut : 0, even: 1, swapRev });
     }
   applyArmEven(out, P); // 各アーム密度の均一化（gradient専用・位置不変・7次=腕は不変）
   return out;
@@ -542,7 +549,7 @@ function flowDotField(P: LiquidGlassParams, phase: number, flow: IntroFlow): Dot
       shade: mix(a ? from.shade : 0, b ? to.shade : 0),
       outer: mix(from.outer, to.outer),
       even: mix(from.even, to.even),
-      tShift: mix(from.tShift ?? 0, to.tShift ?? 0),
+      swapRev: mix(from.swapRev ?? 0, to.swapRev ?? 0),
     };
   });
 }
@@ -643,7 +650,7 @@ function drawC3(
         sa = d[k + 3] / 255;
         col = sa > 0.06 ? [d[k], d[k + 1], d[k + 2]] : base;
       } else if (isGradient(P)) {
-        col = gradientRgb(dt.sr, dt.i, base2, base3, base, P, dt.tShift);
+        col = gradientRgb(dt.sr, dt.i, base2, base3, base, P, dt.swapRev);
       }
       col = applyDotAppearance(col, dt.sr, P); // 内/外明るさ＋色味調整（既定は無変換）
       // edgeFade(alphaI 第3引数=dt.outer)と armEven(*dt.even) を alpha に同時適用（色/径/cull は不変）。
@@ -708,7 +715,7 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   toneTintColor: "#ffffff",
   animA: 1,
   animB: 0,
-  motion: 2, // 既定＝吸い込み（最新save）。この静止形状を基準に濃度均一を狙う
+  motion: 5, // 既定＝グラデ反転波（2色が波紋状に入れ替わる／アクセントも同期してチカチカ切替）
   inflow: 1.25,
   count: 1,
   blend: "lighter",
@@ -882,15 +889,15 @@ const accentColor = (P: LiquidGlassParams) =>
 // それ以外のモーション（や solid）は従来どおり単色 accentColor を返す＝バイト一致。
 function accentPalette(P: LiquidGlassParams, phase: number): string | string[] {
   if (P.motion !== 5 || !isGradient(P)) return accentColor(P);
-  const amp = P.inflow > 0 ? clamp(P.inflow, 0, 1) : 0;
   const teal = rgbHex(applyDotAppearance(innerRgb(P), P.ringR - 0.28, P)); // 内色（innerHide時は外色で代替）
   const violet = rgbHex(applyDotAppearance(rgbOf(P.dotColor), P.ringR + 0.28, P)); // 外色
-  // 弧の代表 t（内=teal寄り0.15 / 外=violet寄り0.85）を半径波でシフトし、0.5 をしきい値に純2色へスナップ。
-  const pick = (srRep: number, t0: number) =>
-    clamp(t0 + SWAP_T_AMPLITUDE * amp * Math.sin(TAU * 2 * phase - srRep * 8), 0, 1) < 0.5 ? teal : violet;
-  const innerArc = pick(P.ringR - 0.28, 0.15); // 通常 teal → 入替で violet
-  const outerArc = pick(P.ringR + 0.28, 0.85); // 通常 violet → 入替で teal
-  return [innerArc, outerArc, innerArc, outerArc]; // [右内, 右外, 左内, 左外]（左右対称・純2色のみ）
+  // 内弧/外弧は常に補色（片方 teal・片方 violet）＝「同じ色」状態を構造的に作らず、2色の波紋だけを反復。
+  // 共有リップル波の符号で [内teal/外violet] ⇔ [内violet/外teal] をハード切替＝グラフィックと同期して
+  // チカチカ。内弧の色はグラフィック内側領域の色（s>0で violet 寄り）と一致する。inflow=0 は静的。
+  const swapped = P.inflow > 0 && ripplePhase(P.ringR - 0.28, phase) >= 0;
+  const innerArc = swapped ? violet : teal;
+  const outerArc = swapped ? teal : violet;
+  return [innerArc, outerArc, innerArc, outerArc]; // [右内, 右外, 左内, 左外]（左右対称・内外は常に異色）
 }
 
 // ハーフトーンのドット場を <circle>/<ellipse> 群で出力（W×H 空間・中央寄せ）。
@@ -956,7 +963,7 @@ function liquidGlassShapes(
       sa = d[k + 3] / 255;
       col = sa > 0.06 ? [d[k], d[k + 1], d[k + 2]] : base;
     } else if (isGradient(P)) {
-      col = gradientRgb(dt.sr, dt.i, base2, base3, base, P, dt.tShift);
+      col = gradientRgb(dt.sr, dt.i, base2, base3, base, P, dt.swapRev);
     }
     col = applyDotAppearance(col, dt.sr, P); // 内/外明るさ＋色味調整（既定は無変換＝<circle fill> もバイト一致）
     const a = clamp(alphaI(dt.i, P, dt.outer) * dt.shade * dt.even * P.dotAlpha * innerAlphaF(dt.sr, P) * (P.dotSource === "blob" ? 0.25 + 0.75 * sa : 1), 0, 1);
@@ -1111,7 +1118,7 @@ function drawIntroReveal(
     if (a < (isGradient(P) && P.edgeFade > 0 && dt.outer > 0 ? 0.001 : 0.02)) continue;
     // 色は drawC3 と一致させる（gradient は半径補間、それ以外は単色）＋色味調整レイヤー。
     // ＝A末端が pattern4 と厳密一致。blob は導入中は単色フォールバック。
-    const col = applyDotAppearance(isGradient(P) ? gradientRgb(dt.sr, dt.i, base2, base3, base, P, dt.tShift) : base, dt.sr, P);
+    const col = applyDotAppearance(isGradient(P) ? gradientRgb(dt.sr, dt.i, base2, base3, base, P, dt.swapRev) : base, dt.sr, P);
     tg.fillStyle = cstr(col, a);
     tg.beginPath();
     if (Math.abs(P.dotAspect - 1) < 0.02) tg.arc(pxt, pyt, rx, 0, TAU);

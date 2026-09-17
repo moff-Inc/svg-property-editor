@@ -14,44 +14,55 @@ const { dotField, createLiquidGlass, LIQUID_GLASS_DEFAULTS } = await import(
 
 const params = { ...LIQUID_GLASS_DEFAULTS, wordmark: 0 }; // gradient source by default
 const near = (a, b, t = 1e-9) => assert.ok(Math.abs(a - b) <= t, `${a} != ${b}`);
-const AMP = 0.5; // SWAP_T_AMPLITUDE
 const hue = (r, g, b) => { r /= 255; g /= 255; b /= 255; const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn; let h = 0; if (d > 1e-9) { if (mx === r) h = ((g - b) / d + (g < b ? 6 : 0)); else if (mx === g) h = ((b - r) / d + 2); else h = ((r - g) / d + 4); } return h * 60; };
 const sat = (r, g, b) => { const mx = Math.max(r, g, b), mn = Math.min(r, g, b); return mx === 0 ? 0 : (mx - mn) / mx; };
 
-// motion=5 swaps teal↔violet by shifting the gradient position (tShift). Colour stays ON the
-// teal→violet gradient line, so no 3rd colour (green/blue beyond the gradient) is ever produced.
+// motion=5 CIRCULATES the gradient via a reversal weight (swapRev∈[0,1]): 0=正順(inner teal),
+// 1=反転(inner violet). Colour stays ON the teal→violet line, so no 3rd colour (green) appears.
 
-// 1. Geometry identical to standard; only tShift (colour) and shade (opacity) are modulated.
+// 1. Geometry identical to standard; only swapRev (colour) and shade (opacity) are modulated.
 for (const phase of [0, 0.2, 0.5, 0.75]) {
   const std = dotField({ ...params, motion: 1 }, phase);
   const wave = dotField({ ...params, motion: 5 }, phase);
   assert.equal(std.length, wave.length);
   std.forEach((d, i) => { for (const k of ['x', 'y', 'i', 'sr', 'ang', 'even']) near(d[k], wave[i][k]); });
 }
-// 2. tShift & shade are radial (angle-free): same sr → same tShift/shade regardless of angle.
+// 2. swapRev & shade are radial (angle-free): same sr → same swapRev/shade regardless of angle.
 {
   const wave = dotField({ ...params, motion: 5 }, 0.15);
-  const ts = wave.map(d => d.tShift), sh = wave.map(d => d.shade);
-  assert.ok(Math.min(...ts) < -0.1 && Math.max(...ts) > 0.1, 'tShift must swing ± (swap active)');
-  assert.ok(Math.max(...ts) <= AMP + 1e-9 && Math.min(...ts) >= -AMP - 1e-9, 'tShift within ±amplitude');
+  const sh = wave.map(d => d.shade);
   assert.ok(Math.min(...sh) < 0.95 && Math.max(...sh) > 1.05, 'shade must pulse');
   const byR = new Map();
-  for (const d of wave) { const k = d.sr.toFixed(4); if (byR.has(k)) { near(byR.get(k)[0], d.tShift, 1e-9); near(byR.get(k)[1], d.shade, 1e-9); } else byR.set(k, [d.tShift, d.shade]); }
+  for (const d of wave) { const k = d.sr.toFixed(4); if (byR.has(k)) { near(byR.get(k)[0], d.swapRev, 1e-9); near(byR.get(k)[1], d.shade, 1e-9); } else byR.set(k, [d.swapRev, d.shade]); }
 }
-// 3. inflow=0 disables the swap → tShift 0 and shade 1 everywhere (equals standard).
+// 2b. FULL circulation: over the loop swapRev reaches ~0 (inner teal / 正順) AND ~1 (inner violet /
+//     反転) — i.e. the outer colour genuinely reaches the inside. Also swapRev ∈ [0,1] always.
+{
+  let lo = 1, hi = 0;
+  for (let k = 0; k < 24; k++) {
+    for (const d of dotField({ ...params, motion: 5 }, k / 24)) {
+      assert.ok(d.swapRev >= -1e-9 && d.swapRev <= 1 + 1e-9, `swapRev must stay in [0,1], got ${d.swapRev}`);
+      if (d.swapRev < lo) lo = d.swapRev;
+      if (d.swapRev > hi) hi = d.swapRev;
+    }
+  }
+  assert.ok(lo < 0.05, `swapRev must reach ~0 (正順/inner teal), min=${lo.toFixed(3)}`);
+  assert.ok(hi > 0.95, `swapRev must reach ~1 (反転/inner violet=outer colour inside), max=${hi.toFixed(3)}`);
+}
+// 3. inflow=0 disables → swapRev 0 (正順) and shade 1 everywhere (equals standard).
 for (const phase of [0, 0.4, 0.93]) {
   const w = dotField({ ...params, motion: 5, inflow: 0 }, phase);
-  assert.ok(w.every(d => d.tShift === 0 && d.shade === 1), 'inflow=0 must fully disable motion=5');
+  assert.ok(w.every(d => d.swapRev === 0 && d.shade === 1), 'inflow=0 must fully disable motion=5');
 }
-// 4. tShift travels (animates): same dot changes across phases.
+// 4. Circulation travels (animates): same dot changes swapRev across phases.
 const w0 = dotField({ ...params, motion: 5 }, 0);
 const midById = new Map(dotField({ ...params, motion: 5 }, 0.37).map(d => [d.id, d]));
 let moved = 0, common = 0;
-for (const d of w0) { const m = midById.get(d.id); if (!m) continue; common++; if (Math.abs(d.tShift - m.tShift) > 0.1) moved++; }
-assert.ok(moved > common * 0.3, `swap wave must animate: only ${moved}/${common} dots changed`);
+for (const d of w0) { const m = midById.get(d.id); if (!m) continue; common++; if (Math.abs(d.swapRev - m.swapRev) > 0.1) moved++; }
+assert.ok(moved > common * 0.3, `circulation must animate: only ${moved}/${common} dots changed`);
 // 5. Seamless loop + deterministic seek.
 const loopA = dotField({ ...params, motion: 5 }, 0), loopB = dotField({ ...params, motion: 5 }, 1);
-loopA.forEach((d, i) => { for (const k of ['x', 'y', 'i', 'sr', 'ang', 'shade', 'even', 'tShift']) near(d[k], loopB[i][k], 1e-6); });
+loopA.forEach((d, i) => { for (const k of ['x', 'y', 'i', 'sr', 'ang', 'shade', 'even', 'swapRev']) near(d[k], loopB[i][k], 1e-6); });
 const at = dotField({ ...params, motion: 5 }, 0.317);
 dotField({ ...params, motion: 5 }, 0.8);
 assert.deepEqual(dotField({ ...params, motion: 5 }, 0.317), at);
@@ -120,18 +131,23 @@ for (const motion of [1, 2, 3]) {
   assert.ok(f.every(c => c === f[0]), `motion ${motion} accent must stay single-colour`);
 }
 const TEAL = '#17f0d9', VIOLET = '#6a2bff';
-let swapObserved = false;
-for (const phase of [0, 0.1, 0.2, 0.3, 0.4, 0.5]) {
+// Accent invariant: at EVERY phase the two arcs are complementary (one teal, one violet) — the
+// "same colour on both arcs" state must never occur — and both arrangements are visited (it swaps).
+const seenArr = new Set();
+for (let k = 0; k <= 48; k++) {
+  const phase = k / 48;
   const f = accentFills({ ...withWord, motion: 5 }, phase);
   assert.equal(f.length, 4);
   assert.ok(f.every(c => c === TEAL || c === VIOLET), `accent must be ONLY the 2 base colours, got ${f}`);
   assert.equal(f[0], f[2], 'inner arcs symmetric');
   assert.equal(f[1], f[3], 'outer arcs symmetric');
-  if (f[0] === VIOLET || f[1] === TEAL) swapObserved = true; // inner→violet or outer→teal = a swap
+  assert.notEqual(f[0], f[1], `inner and outer arcs must never be the same colour (phase ${phase.toFixed(3)}: ${f})`);
+  seenArr.add(f[0] + '|' + f[1]);
 }
-assert.ok(swapObserved, 'accent colours must swap (inner↔outer) at some phase');
-// rest phase: inner=teal, outer=violet.
+assert.ok(seenArr.has(`${TEAL}|${VIOLET}`) && seenArr.has(`${VIOLET}|${TEAL}`),
+  `accent must repeat BOTH 2-colour arrangements, saw ${[...seenArr]}`);
+// inflow=0 → static rest: inner teal / outer violet.
 const rest = accentFills({ ...withWord, motion: 5, inflow: 0 }, 0.3);
 assert.deepEqual(rest, [TEAL, VIOLET, TEAL, VIOLET], 'inflow=0 → inner teal / outer violet');
 
-console.log(`PASS: motion=5 swaps teal↔violet on the gradient line (recoloured ${recoloured}/${matched}, green dots ${greenDots}, out-of-range ${outOfRange}), radial & seamless, ${cases} Canvas/SVG parity; accent swaps using ONLY 2 base colours`);
+console.log(`PASS: motion=5 swaps teal↔violet on the gradient line (recoloured ${recoloured}/${matched}, green dots ${greenDots}, out-of-range ${outOfRange}), radial & seamless, ${cases} Canvas/SVG parity; accent = complementary 2-colour ripple (never same colour, both arrangements ${[...seenArr].length})`);
