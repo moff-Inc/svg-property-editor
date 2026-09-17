@@ -6,10 +6,10 @@ import path from 'node:path';
 const sourceDir = path.resolve('src/lib/identity');
 const source = await readFile(path.join(sourceDir, 'liquidGlass.ts'), 'utf8');
 const result = await build({
-  stdin: { contents: source + '\nexport { accentCycles, accentRipple, dotField, introGraphicParams, introTiming, motionDirection, wordmarkLetterScales, wordmarkRevealTiming };', resolveDir: sourceDir, loader: 'ts' },
+  stdin: { contents: source + '\nexport { accentAlphaCycles, accentCycles, accentOpacityPair, accentRipple, dotField, flowDotField, introGraphicParams, introParticleParams, introTiming, motionDirection, wordmarkLetterScales, wordmarkRevealTiming };', resolveDir: sourceDir, loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm',
 });
-const { accentCycles, accentRipple, dotField, introGraphicParams, introTiming, motionDirection, wordmarkLetterScales, wordmarkRevealTiming, createLiquidGlass, LIQUID_GLASS_DEFAULTS } = await import(
+const { accentAlphaCycles, accentCycles, accentOpacityPair, accentRipple, dotField, flowDotField, introGraphicParams, introParticleParams, introTiming, motionDirection, wordmarkLetterScales, wordmarkRevealTiming, createLiquidGlass, LIQUID_GLASS_DEFAULTS } = await import(
   `data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 
 const params = { ...LIQUID_GLASS_DEFAULTS, wordmark: 0 }; // gradient source by default
@@ -19,11 +19,57 @@ const sat = (r, g, b) => { const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
 
 assert.equal(LIQUID_GLASS_DEFAULTS.rippleCycles, 2, 'default ripple speed must be the slower 2 waves/loop');
 assert.equal(LIQUID_GLASS_DEFAULTS.accentAlpha, 1, 'accent opacity must default to fully visible');
+assert.equal(LIQUID_GLASS_DEFAULTS.accentInnerAlpha, 1);
+assert.equal(LIQUID_GLASS_DEFAULTS.accentOuterAlpha, 1);
+assert.equal(LIQUID_GLASS_DEFAULTS.accentAlphaMotion, 0);
+assert.equal(LIQUID_GLASS_DEFAULTS.accentAlphaCycles, 1);
 assert.equal(LIQUID_GLASS_DEFAULTS.introWordSeconds, 4.8);
+assert.equal(LIQUID_GLASS_DEFAULTS.introDimStartSeconds, 0);
+assert.equal(LIQUID_GLASS_DEFAULTS.introDimSpeed, 1);
+assert.equal(LIQUID_GLASS_DEFAULTS.introLetterScale, 1.1);
 assert.equal(LIQUID_GLASS_DEFAULTS.introAccentSeconds, 3);
+assert.equal(LIQUID_GLASS_DEFAULTS.introAccentStartOffset, 0);
 assert.equal(accentCycles(LIQUID_GLASS_DEFAULTS), 1, 'accent must animate one cycle slower than the default graphic');
 assert.equal(accentCycles({ ...LIQUID_GLASS_DEFAULTS, rippleCycles: 3 }), 2);
 assert.equal(accentCycles({ ...LIQUID_GLASS_DEFAULTS, rippleCycles: 1 }), 1);
+
+// Accent opacity motion: OFF preserves the configured endpoints; ON smoothly swaps them and
+// returns to the exact starting state at the loop seam. Integer cycles provide loop-safe speed.
+{
+  const base = { ...LIQUID_GLASS_DEFAULTS, accentInnerAlpha: 0.2, accentOuterAlpha: 0.8 };
+  assert.deepEqual(accentOpacityPair(base, 0.37), { inner: 0.2, outer: 0.8 });
+  const animated = { ...base, accentAlphaMotion: 1, accentAlphaCycles: 1 };
+  assert.deepEqual(accentOpacityPair(animated, 0), { inner: 0.2, outer: 1 });
+  const swapped = accentOpacityPair(animated, 0.5);
+  near(swapped.inner, 1);
+  near(swapped.outer, 0.8);
+  const seam = accentOpacityPair(animated, 1);
+  near(seam.inner, 0.2);
+  near(seam.outer, 1);
+  const oneCycleQuarter = accentOpacityPair(animated, 0.25);
+  near(oneCycleQuarter.inner, 0.6);
+  near(oneCycleQuarter.outer, 0.9);
+  const twoCyclesQuarter = accentOpacityPair({ ...animated, accentAlphaCycles: 2 }, 0.25);
+  near(twoCyclesQuarter.inner, 1);
+  near(twoCyclesQuarter.outer, 0.8);
+  assert.equal(accentAlphaCycles({ ...animated, accentAlphaCycles: 2.4 }), 2);
+  assert.equal(accentAlphaCycles({ ...animated, accentAlphaCycles: 99 }), 6);
+
+  let previous = accentOpacityPair(animated, 0);
+  let maxStep = 0;
+  for (let k = 1; k <= 1000; k++) {
+    const current = accentOpacityPair(animated, k / 1000);
+    maxStep = Math.max(maxStep, Math.abs(current.inner - previous.inner), Math.abs(current.outer - previous.outer));
+    previous = current;
+  }
+  assert.ok(maxStep < 0.003, `opacity exchange must be smooth, max step=${maxStep}`);
+
+  const opaque = { ...animated, accentInnerAlpha: 1, accentOuterAlpha: 1 };
+  for (const phase of [0, 0.125, 0.37, 0.5, 0.875, 1]) {
+    assert.deepEqual(accentOpacityPair(opaque, phase), { inner: 1, outer: 1 },
+      `opacity 1 must remain fully opaque at phase ${phase}`);
+  }
+}
 
 // Intro-only graphic settings: mode 5, three cycles, and the opposite rotation direction.
 {
@@ -45,14 +91,50 @@ assert.equal(accentCycles({ ...LIQUID_GLASS_DEFAULTS, rippleCycles: 1 }), 1);
   });
 }
 
+// Pattern 2 morphs the initial graphic into a softer, more turbulent particle field while
+// preserving deterministic endpoints and stable particle IDs.
+{
+  const particle = introParticleParams(LIQUID_GLASS_DEFAULTS);
+  assert.equal(particle.motion, 3);
+  assert.ok(particle.fieldBlur >= 0.36);
+  assert.ok(particle.turbulence >= 2.2);
+  assert.ok(particle.contrast <= 0.9);
+  const expected = dotField(particle, 0.23);
+  const actual = flowDotField(LIQUID_GLASS_DEFAULTS, 0.23, {
+    progress: 1, travel: 0, target: 'particles', colorMix: 1, color: '#000000',
+  });
+  assert.deepEqual(actual, expected, 'pattern 2 morph endpoint must equal the particle field');
+  assert.deepEqual(
+    flowDotField(LIQUID_GLASS_DEFAULTS, 0.23, { progress: 0.5, travel: 0, target: 'particles' }),
+    flowDotField(LIQUID_GLASS_DEFAULTS, 0.23, { progress: 0.5, travel: 0, target: 'particles' }),
+    'pattern 2 particle morph must be deterministic',
+  );
+}
+
 // Adjustable D/E durations change the real intro length.
 {
   const timing = introTiming(LIQUID_GLASS_DEFAULTS);
   assert.equal(timing.wordSeconds, 4.8);
   assert.equal(timing.accentSeconds, 3);
+  assert.equal(timing.accentStartOffset, 0);
+  assert.equal(timing.accentStart, 14);
   assert.equal(timing.total, 17);
   const custom = introTiming({ ...LIQUID_GLASS_DEFAULTS, introWordSeconds: 2.5, introAccentSeconds: 1.5 });
   near(custom.total, 13.2);
+  const overlap = introTiming({ ...LIQUID_GLASS_DEFAULTS, introAccentStartOffset: -1 });
+  assert.equal(overlap.accentStart, 13);
+  assert.equal(overlap.total, 16);
+  const delayed = introTiming({ ...LIQUID_GLASS_DEFAULTS, introAccentStartOffset: 1 });
+  assert.equal(delayed.accentStart, 15);
+  assert.equal(delayed.total, 18);
+  const particle = introTiming({ ...LIQUID_GLASS_DEFAULTS, introPattern: 2 });
+  near(particle.particleMorphEnd, 6.8);
+  near(particle.wordStart, 6.8);
+  near(particle.wordEnd, 11.6);
+  near(particle.graphicEnd, 14);
+  near(particle.accentStart, particle.wordEnd);
+  near(particle.total, 14.6);
+  assert.ok(particle.wordEnd < particle.graphicEnd, 'the second graphic must appear only after the word is complete');
 }
 
 // Intro section E finishes after exactly the second visible accent ripple and connects at alpha=1.
@@ -72,27 +154,32 @@ assert.equal(accentCycles({ ...LIQUID_GLASS_DEFAULTS, rippleCycles: 1 }), 1);
 
 // Reference text reveal: dim glyphs lead, bright glyphs follow, both finish without a jump.
 {
-  let previous = wordmarkRevealTiming(0);
+  let previous = wordmarkRevealTiming(0, LIQUID_GLASS_DEFAULTS);
   assert.deepEqual(previous, { dim: 0, bright: 0 });
   for (let k = 1; k <= 100; k++) {
-    const current = wordmarkRevealTiming(k / 100);
+    const current = wordmarkRevealTiming(k / 100, LIQUID_GLASS_DEFAULTS);
     assert.ok(current.dim >= previous.dim && current.bright >= previous.bright, 'wordmark reveal must be monotonic');
     assert.ok(current.dim + 1e-9 >= current.bright, 'dim precursor must lead the bright text');
     previous = current;
   }
-  assert.deepEqual(wordmarkRevealTiming(1), { dim: 1, bright: 1 });
-  const early = wordmarkRevealTiming(0.1);
+  assert.deepEqual(wordmarkRevealTiming(1, LIQUID_GLASS_DEFAULTS), { dim: 1, bright: 1 });
+  const early = wordmarkRevealTiming(0.1, LIQUID_GLASS_DEFAULTS);
   assert.ok(early.dim > early.bright && early.dim > 0, 'dim text must appear before the bright pass');
+  const delayed = { ...LIQUID_GLASS_DEFAULTS, introDimStartSeconds: 1 };
+  assert.equal(wordmarkRevealTiming(0.1, delayed).dim, 0, 'dim text must wait for its configured start time');
+  const slow = wordmarkRevealTiming(0.2, { ...LIQUID_GLASS_DEFAULTS, introDimSpeed: 0.5 }).dim;
+  const fast = wordmarkRevealTiming(0.2, { ...LIQUID_GLASS_DEFAULTS, introDimSpeed: 2 }).dim;
+  assert.ok(fast > slow, 'higher dim speed must reveal the precursor faster');
 }
 
 // Each glyph briefly starts at 1.1x when its left-to-right reveal begins, then returns to 1x.
 {
-  assert.deepEqual(wordmarkLetterScales(0), Array(10).fill(1));
-  assert.deepEqual(wordmarkLetterScales(1), Array(10).fill(1));
+  assert.deepEqual(wordmarkLetterScales(0, LIQUID_GLASS_DEFAULTS), Array(10).fill(1));
+  assert.deepEqual(wordmarkLetterScales(1, LIQUID_GLASS_DEFAULTS), Array(10).fill(1));
   const maxima = Array(10).fill(1);
   let foundStaggeredFrame = false;
   for (let k = 0; k <= 1000; k++) {
-    const scales = wordmarkLetterScales(k / 1000);
+    const scales = wordmarkLetterScales(k / 1000, LIQUID_GLASS_DEFAULTS);
     assert.equal(scales.length, 10);
     scales.forEach((scale, i) => {
       assert.ok(scale >= 1 && scale <= 1.100001, `letter ${i} scale out of range: ${scale}`);
@@ -103,6 +190,13 @@ assert.equal(accentCycles({ ...LIQUID_GLASS_DEFAULTS, rippleCycles: 1 }), 1);
   }
   assert.ok(maxima.every(scale => scale > 1.099), `every letter must reach 1.1x: ${maxima.join(', ')}`);
   assert.ok(foundStaggeredFrame, 'letter pops must be staggered rather than scaling the whole wordmark');
+  const adjustableMaxima = Array(10).fill(1);
+  for (let k = 0; k <= 1000; k++) {
+    wordmarkLetterScales(k / 1000, { ...LIQUID_GLASS_DEFAULTS, introLetterScale: 1.5 })
+      .forEach((scale, i) => { adjustableMaxima[i] = Math.max(adjustableMaxima[i], scale); });
+  }
+  assert.ok(adjustableMaxima.every(scale => scale > 1.499 && scale <= 1.5),
+    `every letter must support a 1.5x peak: ${adjustableMaxima.join(', ')}`);
 }
 
 // motion=5 CIRCULATES the gradient via a reversal weight (swapRev∈[0,1]): 0=正順(inner teal),
@@ -191,6 +285,7 @@ globalThis.Path2D = class Path2D {};
 const renderer = createLiquidGlass(), canvas = context();
 assert.equal(renderer.getIntroSeconds(LIQUID_GLASS_DEFAULTS), 17);
 near(renderer.getIntroSeconds({ ...LIQUID_GLASS_DEFAULTS, introWordSeconds: 2.5, introAccentSeconds: 1.5 }), 13.2);
+near(renderer.getIntroSeconds({ ...LIQUID_GLASS_DEFAULTS, introPattern: 2 }), 14.6);
 function render(p, phase, size = 720) { for (const c of contexts) c.dots = []; renderer.render(canvas, size, size, phase, p); return contexts.flatMap(c => c.dots); }
 const flat = { ...params, dotGlow: 0, dotBlur: 0 };
 const key = d => `${d.x.toFixed(2)},${d.y.toFixed(2)}`;
@@ -199,6 +294,9 @@ const key = d => `${d.x.toFixed(2)},${d.y.toFixed(2)}`;
 // D=two-layer wordmark reveal. This is a low-cost runtime guard, not a visual approval.
 for (const t01 of [0.15, 0.35, 0.65]) {
   renderer.renderIntro(canvas, 720, 720, t01, 0.2, { ...flat, wordmark: 1, introPattern: 1 });
+}
+for (const t01 of [0.4, 0.55, 0.72, 0.9]) {
+  renderer.renderIntro(canvas, 720, 720, t01, 0.2, { ...flat, wordmark: 1, introPattern: 2 });
 }
 const introGradients = contexts.flatMap(c => c.gradients);
 assert.ok(introGradients.some(g => g.x0 === 64 && g.x1 === 103), 'intro wordmark must render its mirrored colour gradient');
@@ -247,8 +345,13 @@ function accentFills(svg) {
 }
 function gradientStops(svg, id) {
   const body = svg.match(new RegExp(`<linearGradient id="${id}"[^>]*>(.*?)<\\/linearGradient>`))?.[1] ?? '';
-  return [...body.matchAll(/<stop offset="([^"]+)" stop-color="([^"]+)"\/>/g)]
+  return [...body.matchAll(/<stop offset="([^"]+)" stop-color="([^"]+)"(?: stop-opacity="[^"]+")?\/>/g)]
     .map(([, offset, color]) => [+offset, color.toLowerCase()]);
+}
+function gradientOpacities(svg, id) {
+  const body = svg.match(new RegExp(`<linearGradient id="${id}"[^>]*>(.*?)<\\/linearGradient>`))?.[1] ?? '';
+  return [...body.matchAll(/<stop offset="[^"]+" stop-color="[^"]+"(?: stop-opacity="([^"]+)")?\/>/g)]
+    .map(([, opacity]) => opacity == null ? 1 : +opacity);
 }
 function accentState(p, phase) {
   const svg = renderer.toSvg({ params: p, phase, loopSeconds: 12 });
@@ -256,6 +359,8 @@ function accentState(p, phase) {
     fills: accentFills(svg),
     left: gradientStops(svg, 'mood-accent-left'),
     right: gradientStops(svg, 'mood-accent-right'),
+    leftOpacity: gradientOpacities(svg, 'mood-accent-left'),
+    rightOpacity: gradientOpacities(svg, 'mood-accent-right'),
   };
 }
 for (const motion of [1, 2, 3, 4, 5]) {
@@ -311,6 +416,21 @@ const fullInflow = accentState({ ...withWord, motion: 5, inflow: 2 }, 0.3);
 assert.deepEqual(noInflow.left, fullInflow.left);
 assert.deepEqual(noInflow.right, fullInflow.right);
 
+// Inner/outer opacity controls form a mirrored transparency gradient in SVG.
+const fadedEnds = accentState({ ...withWord, accentInnerAlpha: 0.2, accentOuterAlpha: 0.8 }, 0.3);
+assert.deepEqual(fadedEnds.leftOpacity, [0.8, 0.5, 0.2]);
+assert.deepEqual(fadedEnds.rightOpacity, [0.2, 0.5, 0.8]);
+
+// Animated endpoint opacity remains a spatial gradient, swaps at half-cycle, and closes the seam.
+const alphaMotion = { ...withWord, accentInnerAlpha: 0.2, accentOuterAlpha: 0.8, accentAlphaMotion: 1, accentAlphaCycles: 1 };
+const alphaStart = accentState(alphaMotion, 0);
+const alphaSwap = accentState(alphaMotion, 0.5);
+const alphaSeam = accentState(alphaMotion, 1);
+assert.deepEqual(alphaStart.leftOpacity, [1, 0.6, 0.2]);
+assert.deepEqual(alphaSwap.leftOpacity, [0.8, 0.9, 1]);
+assert.deepEqual(alphaStart.leftOpacity, alphaSeam.leftOpacity);
+assert.deepEqual(alphaStart.rightOpacity, alphaSeam.rightOpacity);
+
 // SVG export carries the adjustable accent opacity on all four accent paths.
 const fadedSvg = renderer.toSvg({ params: { ...withWord, accentAlpha: 0.35 }, phase: 0.3, loopSeconds: 12 });
 const fadedAccent = [...fadedSvg.matchAll(/fill="url\(#mood-accent-(?:left|right)\)" opacity="([^"]+)"/g)];
@@ -326,4 +446,13 @@ assert.equal(logoGradients.length, 2);
 assert.deepEqual(logoGradients.find(g => g.x0 === 64).stops, noInflow.left);
 assert.deepEqual(logoGradients.find(g => g.x0 === 196).stops, noInflow.right);
 
-console.log(`PASS: adjustable word/accent intro durations, continuously moving intro graphic, ripple 2, and per-letter 1.1x reveal; graphic motion=5 swaps teal↔violet on the gradient line (recoloured ${recoloured}/${matched}, green dots ${greenDots}, out-of-range ${outOfRange}), radial & seamless, ${cases} Canvas/SVG parity; accent = slower always-on smooth mirrored gradient across every mode/source (${seenOuter.size} colours, max RGB step ${maxAccentStep}, adjustable opacity)`);
+// Canvas carries the same outer↔inner alpha ramp inside each accent gradient.
+canvas.gradients = [];
+render({ ...flat, wordmark: 1, accentInnerAlpha: 0.2, accentOuterAlpha: 0.8 }, 0.3);
+const fadedCanvas = canvas.gradients.filter(g => (g.x0 === 64 && g.x1 === 103) || (g.x0 === 196 && g.x1 === 231));
+const leftFade = fadedCanvas.find(g => g.x0 === 64).stops.map(([, color]) => color);
+const rightFade = fadedCanvas.find(g => g.x0 === 196).stops.map(([, color]) => color);
+assert.ok(leftFade[0].endsWith(', 0.8)') && leftFade[2].endsWith(', 0.2)'));
+assert.ok(rightFade[0].endsWith(', 0.2)') && rightFade[2].endsWith(', 0.8)'));
+
+console.log(`PASS: adjustable dim-text timing/speed, 1–1.5x letter reveal, and signed accent start offset; pattern 2 deterministically morphs into text-coloured particles, forms the word, then reveals the second graphic; graphic motion=5 swaps teal↔violet on the gradient line (recoloured ${recoloured}/${matched}, green dots ${greenDots}, out-of-range ${outOfRange}), radial & seamless, ${cases} Canvas/SVG parity; accent = slower always-on smooth mirrored gradient across every mode/source (${seenOuter.size} colours, max RGB step ${maxAccentStep}, master plus loop-safe inner/outer opacity exchange)`);

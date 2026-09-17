@@ -50,3 +50,4 @@ next-env.d.ts
 
 # ローカルDBのデータバックアップ（ユーザーデータ。コミットしない）
 supabase/backup*.sql
+ios/MoodMetrix/.build/

@@ -559,7 +559,7 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
             </div>
           </div>
 
-          <ControlsPanel spec={active.controls} params={params} onChange={applyPatch} />
+          <ControlsPanel spec={active.controls} params={params} defaults={active.defaults} onChange={applyPatch} />
 
           {!isMockPreview && <div className="gen-section">
             <div className="gen-section-title">

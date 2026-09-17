@@ -11,6 +11,8 @@ export interface MoodMetrixAccentGradient {
   inner: string;
   middle: string;
   outer: string;
+  innerAlpha?: number;
+  outerAlpha?: number;
 }
 
 export type MoodMetrixAccent = string | string[] | MoodMetrixAccentGradient;
@@ -68,15 +70,28 @@ function paths() {
 const isAccentGradient = (accent: MoodMetrixAccent): accent is MoodMetrixAccentGradient =>
   typeof accent === "object" && !Array.isArray(accent) && accent.kind === "mirrored-gradient";
 
+const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+
+const colorWithAlpha = (color: string, alpha: number) => {
+  const a = clamp01(alpha);
+  if (a >= 1) return color;
+  const hex = color.match(/^#([\da-f]{2})([\da-f]{2})([\da-f]{2})$/i);
+  if (!hex) return color;
+  return `rgba(${parseInt(hex[1], 16)}, ${parseInt(hex[2], 16)}, ${parseInt(hex[3], 16)}, ${Number(a.toFixed(4))})`;
+};
+
 const addGradientStops = (
   gradient: CanvasGradient,
   start: string,
   middle: string,
   end: string,
+  startAlpha = 1,
+  endAlpha = 1,
 ) => {
-  gradient.addColorStop(0, start);
-  gradient.addColorStop(0.5, middle);
-  gradient.addColorStop(1, end);
+  const middleAlpha = (clamp01(startAlpha) + clamp01(endAlpha)) / 2;
+  gradient.addColorStop(0, colorWithAlpha(start, startAlpha));
+  gradient.addColorStop(0.5, colorWithAlpha(middle, middleAlpha));
+  gradient.addColorStop(1, colorWithAlpha(end, endAlpha));
 };
 
 // canvas へ描画。(x,y) を左上、scale 倍、accent はアクセント色（「((」「))」）。
@@ -120,8 +135,10 @@ export function drawMoodMetrix(
     // 弧ごとのベタ塗りではなく、参照画像どおり各弧の内部にもブルーの遷移が現れる。
     const left = ctx.createLinearGradient(64, 0, 103, 0);
     const right = ctx.createLinearGradient(196, 0, 231, 0);
-    addGradientStops(left, accent.outer, accent.middle, accent.inner);
-    addGradientStops(right, accent.inner, accent.middle, accent.outer);
+    const innerAlpha = clamp01(accent.innerAlpha ?? 1);
+    const outerAlpha = clamp01(accent.outerAlpha ?? 1);
+    addGradientStops(left, accent.outer, accent.middle, accent.inner, outerAlpha, innerAlpha);
+    addGradientStops(right, accent.inner, accent.middle, accent.outer, innerAlpha, outerAlpha);
     gradientFills = [right, left];
   }
   const accCol = (i: number): string | CanvasGradient => {
@@ -170,13 +187,18 @@ export function moodMetrixSvg(
   let accentDefs = "";
   let gAccent: string;
   if (isAccentGradient(accent)) {
+    const innerAlpha = clamp01(accent.innerAlpha ?? 1);
+    const outerAlpha = clamp01(accent.outerAlpha ?? 1);
+    const middleAlpha = (innerAlpha + outerAlpha) / 2;
+    const stop = (offset: number, color: string, opacity: number) =>
+      `<stop offset="${offset}" stop-color="${color}"${opacity < 1 ? ` stop-opacity="${Number(opacity.toFixed(4))}"` : ""}/>`;
     accentDefs =
       `<defs>` +
       `<linearGradient id="mood-accent-left" gradientUnits="userSpaceOnUse" x1="64" y1="0" x2="103" y2="0">` +
-      `<stop offset="0" stop-color="${accent.outer}"/><stop offset="0.5" stop-color="${accent.middle}"/><stop offset="1" stop-color="${accent.inner}"/>` +
+      stop(0, accent.outer, outerAlpha) + stop(0.5, accent.middle, middleAlpha) + stop(1, accent.inner, innerAlpha) +
       `</linearGradient>` +
       `<linearGradient id="mood-accent-right" gradientUnits="userSpaceOnUse" x1="196" y1="0" x2="231" y2="0">` +
-      `<stop offset="0" stop-color="${accent.inner}"/><stop offset="0.5" stop-color="${accent.middle}"/><stop offset="1" stop-color="${accent.outer}"/>` +
+      stop(0, accent.inner, innerAlpha) + stop(0.5, accent.middle, middleAlpha) + stop(1, accent.outer, outerAlpha) +
       `</linearGradient>` +
       `</defs>`;
     gAccent = ACCENT.map((d, i) =>

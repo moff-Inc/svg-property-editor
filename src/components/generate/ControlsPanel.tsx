@@ -19,16 +19,18 @@ function fillStyle(num: number, min: number, max: number): CSSProperties {
 export default function ControlsPanel({
   spec,
   params,
+  defaults,
   onChange,
 }: {
   spec: ControlsSpec;
   params: Params;
+  defaults: Params;
   onChange: (patch: Params) => void;
 }) {
   return (
     <>
       {spec.map(([title, controls, visibleWhen]) => (
-        visibleWhen && params[visibleWhen.key] !== visibleWhen.equals ? null :
+        visibleWhen && (params[visibleWhen.key] ?? defaults[visibleWhen.key]) !== visibleWhen.equals ? null :
         <div key={title} className="gen-section">
           <div className="gen-section-title">
             <h2>{title}</h2>
@@ -36,11 +38,13 @@ export default function ControlsPanel({
           {controls.map((ctl) => {
             const key = ctl[0];
             const label = ctl[1];
-            const val = params[key];
+            // HMR直後や古い保存データで新規キーが未設定でも、入力へNaN/undefinedを渡さない。
+            const val = params[key] ?? defaults[key];
 
             if (ctl[2] === "r") {
               const [, , , min, max, step, unit] = ctl;
-              const num = typeof val === "number" ? val : Number(val);
+              const raw = typeof val === "number" ? val : Number(val);
+              const num = Number.isFinite(raw) ? raw : min;
               return (
                 <div key={key} className="gen-row">
                   <span>{label}</span>
