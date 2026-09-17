@@ -59,6 +59,7 @@ export interface LiquidGlassParams {
   dotColor: string; // solid色／gradientの外側色（＋ワードマークのアクセント色）
   dotColor2: string; // gradientの内側色（半径で dotColor へ補間）
   dotColor3: string; // 3色グラデ(gradient3)の中間色（内→中→外で補間）
+  gradStart: number; // グラデ内側カラーの始点（-0.6..0.9・0=既定）。+で内側色を外へ広げ、-で内側色を削る
   gradMid: number; // 3色グラデの中間色の位置（0..1・既定0.5）。gradient3 のみ有効
   innerBright: number; // 内側ドットの明るさ倍率（0..2・1=無変換）。穴側の明るさ
   outerBright: number; // 外側ドットの明るさ倍率（0..2・1=無変換）。外周の明るさ
@@ -162,7 +163,13 @@ const isGradient = (P: LiquidGlassParams) => P.dotSource === "gradient" || P.dot
 // (alpha 再増幅)に相殺されない＝白地の主レバー。黒背景は bgWhiteness=0 で完全に無効。
 const CORE_LIFT_WHITE = 0.15; // 0=無効 … 白地で芯を白へ寄せる強度（推奨0.08–0.20。過大で芯が白抜け）
 function gradientRgb(sr: number, i: number, inner: number[], mid: number[], outer: number[], P: LiquidGlassParams): number[] {
-  const t = smoothstep(P.ringR - 0.28, P.ringR + 0.28, sr);
+  // 内側カラーの始点(gradStart): 補間係数 t を [gs,1]→[0,1] へ再マップする。
+  // gs>0 = 内側色が純色のまま外へ広がり、混色の開始が遅れる（内側カラーの面積↑）。
+  // gs<0 = 中心でも既に外側色が混ざった状態から始まる（内側カラーの純色域が消える）。
+  // gs=0 で t は前段と同一式＝solid/blob と同じく全出力バイト一致。2色/3色グラデ共通に効く。
+  const t0 = smoothstep(P.ringR - 0.28, P.ringR + 0.28, sr);
+  const gs = clamp(P.gradStart ?? 0, -0.6, 0.9);
+  const t = gs === 0 ? t0 : clamp((t0 - gs) / (1 - gs), 0, 1);
   // 2色(gradient): inner→outer を t で線形補間（前段と同一式＝バイト一致）。
   // 3色(gradient3): inner→mid→outer を中間色位置 gradMid で2区間に分けて補間。
   let col: number[];
@@ -567,6 +574,7 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   dotColor: "#6a2bff", // 外側＝バイオレット（＋ワードマークのアクセント）
   dotColor2: "#17f0d9", // 内側＝やや明るい cyan 寄り teal（Image #12 の内側発色）
   dotColor3: "#3d6bff", // 3色グラデ(gradient3)の中間色。既定 gradient では未使用
+  gradStart: 0, // グラデ内側カラーの始点（0=従来どおり）
   gradMid: 0.5, // 3色グラデの中間色の位置（0..1）
   innerBright: 1, // 内側ドットの明るさ倍率（1=無変換）
   outerBright: 1, // 外側ドットの明るさ倍率（1=無変換）
@@ -665,6 +673,7 @@ export const LIQUID_GLASS_CONTROLS: ControlsSpec = [
       ["dotSource", "ドットの色", "o", [["blob", "円から採色"], ["solid", "単色"], ["gradient", "2色グラデ"], ["gradient3", "3色グラデ"]]],
       ["dotColor", "カラー（単色／グラデ外側）", "k"],
       ["dotColor2", "グラデ内側カラー", "k"],
+      ["gradStart", "グラデ内側カラーの始点", "r", -0.6, 0.9, 0.01, ""],
       ["dotAlpha", "ドットの不透明度", "r", 0, 1, 0.01, ""],
       ["dotBlur", "ドットのぼかし", "r", 0, 12, 0.1, "px"],
       ["dotGlow", "ドットの発光", "r", 0, 1, 0.01, ""],
