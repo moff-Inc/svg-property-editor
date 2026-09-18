@@ -6,10 +6,10 @@ import path from 'node:path';
 const sourceDir = path.resolve('src/lib/identity');
 const source = await readFile(path.join(sourceDir, 'liquidGlass.ts'), 'utf8');
 const result = await build({
-  stdin: { contents: source + '\nexport { accentAlphaCycles, accentOpacityPair, accentRipple, applyDotAppearance, dotField, flowDotField, gradWindow, gradientRgb, innerRgb, introGraphicParams, introParticleParams, introSlidePosition, introSlideProgress, introTrailSamples, introTiming, motionDirection, ripplePhase, wordmarkLetterScales, wordmarkRevealTiming };', resolveDir: sourceDir, loader: 'ts' },
+  stdin: { contents: source + '\nexport { accentAlphaCycles, accentOpacityPair, accentRipple, applyDotAppearance, dotField, flowDotField, gradWindow, gradientRgb, innerRgb, introGraphicParams, introParticleParams, introSlidePosition, introSlideProgress, introTrailSamples, introTiming, lockupLayout, motionDirection, ripplePhase, wordmarkLetterScales, wordmarkRevealTiming };', resolveDir: sourceDir, loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm',
 });
-const { accentAlphaCycles, accentOpacityPair, accentRipple, applyDotAppearance, dotField, flowDotField, gradWindow, gradientRgb, innerRgb, introGraphicParams, introParticleParams, introSlidePosition, introSlideProgress, introTrailSamples, introTiming, motionDirection, ripplePhase, wordmarkLetterScales, wordmarkRevealTiming, createLiquidGlass, LIQUID_GLASS_DEFAULTS, LIQUID_GLASS_PRESETS } = await import(
+const { accentAlphaCycles, accentOpacityPair, accentRipple, applyDotAppearance, dotField, flowDotField, gradWindow, gradientRgb, innerRgb, introGraphicParams, introParticleParams, introSlidePosition, introSlideProgress, introTrailSamples, introTiming, lockupLayout, motionDirection, ripplePhase, wordmarkLetterScales, wordmarkRevealTiming, createLiquidGlass, LIQUID_GLASS_DEFAULTS, LIQUID_GLASS_PRESETS } = await import(
   `data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 
 const params = { ...LIQUID_GLASS_DEFAULTS, wordmark: 0 }; // gradient source by default
@@ -34,6 +34,7 @@ for (const [key, value] of Object.entries(latestSavedDefaults)) {
   assert.equal(LIQUID_GLASS_DEFAULTS[key], value, `latest SAVE default mismatch: ${key}`);
 }
 assert.deepEqual(LIQUID_GLASS_PRESETS[0], LIQUID_GLASS_DEFAULTS, 'MAIN preset must mirror latest SAVE defaults');
+assert.equal(lockupLayout(1280, 720, false, { ...LIQUID_GLASS_DEFAULTS, gfxX: 0.045 }).gx, 280, 'hidden logo graphic must stay centered');
 assert.deepEqual(
   { dotColor: LIQUID_GLASS_PRESETS.at(-1)?.dotColor, dotColor2: LIQUID_GLASS_PRESETS.at(-1)?.dotColor2 },
   { dotColor: '#b000b9', dotColor2: '#b54d08' },

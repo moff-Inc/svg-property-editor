@@ -1177,7 +1177,9 @@ const inkFor = (bg: string) => {
 // 決めているが、ずらしは両方に同じだけ乗るため差は変わらず、動きは崩れない。
 function lockupLayout(W: number, H: number, showWord: boolean, P: LiquidGlassParams) {
   const D = H; // グラフィック正方形の一辺（mark は min(D,D) 基準＝ON/OFFで同一サイズ）
-  const ox = W * (P.gfxX ?? 0);
+  // gfxX is a lockup adjustment for the logo-on layout; when the logo is
+  // hidden the graphic must remain geometrically centered.
+  const ox = showWord ? W * (P.gfxX ?? 0) : 0;
   const oy = H * (P.gfxY ?? 0);
   const gy = Math.round((H - D) / 2 + oy);
   const gcx = (showWord ? W * 0.2 : W / 2) + ox; // グラフィック中心X: ON=左寄せ / OFF=中央
