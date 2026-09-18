@@ -6,10 +6,10 @@ import path from 'node:path';
 const sourceDir = path.resolve('src/lib/identity');
 const source = await readFile(path.join(sourceDir, 'liquidGlass.ts'), 'utf8');
 const result = await build({
-  stdin: { contents: source + '\nexport { accentAlphaCycles, accentCycles, accentOpacityPair, accentRipple, dotField, flowDotField, introGraphicParams, introParticleParams, introTiming, motionDirection, wordmarkLetterScales, wordmarkRevealTiming };', resolveDir: sourceDir, loader: 'ts' },
+  stdin: { contents: source + '\nexport { accentAlphaCycles, accentOpacityPair, accentRipple, applyDotAppearance, dotField, flowDotField, gradWindow, gradientRgb, innerRgb, introGraphicParams, introParticleParams, introTiming, motionDirection, ripplePhase, wordmarkLetterScales, wordmarkRevealTiming };', resolveDir: sourceDir, loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm',
 });
-const { accentAlphaCycles, accentCycles, accentOpacityPair, accentRipple, dotField, flowDotField, introGraphicParams, introParticleParams, introTiming, motionDirection, wordmarkLetterScales, wordmarkRevealTiming, createLiquidGlass, LIQUID_GLASS_DEFAULTS } = await import(
+const { accentAlphaCycles, accentOpacityPair, accentRipple, applyDotAppearance, dotField, flowDotField, gradWindow, gradientRgb, innerRgb, introGraphicParams, introParticleParams, introTiming, motionDirection, ripplePhase, wordmarkLetterScales, wordmarkRevealTiming, createLiquidGlass, LIQUID_GLASS_DEFAULTS } = await import(
   `data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 
 const params = { ...LIQUID_GLASS_DEFAULTS, wordmark: 0 }; // gradient source by default
@@ -17,26 +17,26 @@ const near = (a, b, t = 1e-9) => assert.ok(Math.abs(a - b) <= t, `${a} != ${b}`)
 const hue = (r, g, b) => { r /= 255; g /= 255; b /= 255; const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn; let h = 0; if (d > 1e-9) { if (mx === r) h = ((g - b) / d + (g < b ? 6 : 0)); else if (mx === g) h = ((b - r) / d + 2); else h = ((r - g) / d + 4); } return h * 60; };
 const sat = (r, g, b) => { const mx = Math.max(r, g, b), mn = Math.min(r, g, b); return mx === 0 ? 0 : (mx - mn) / mx; };
 
-assert.equal(LIQUID_GLASS_DEFAULTS.rippleCycles, 2, 'default ripple speed must be the slower 2 waves/loop');
-assert.equal(LIQUID_GLASS_DEFAULTS.accentAlpha, 1, 'accent opacity must default to fully visible');
-assert.equal(LIQUID_GLASS_DEFAULTS.accentInnerAlpha, 1);
-assert.equal(LIQUID_GLASS_DEFAULTS.accentOuterAlpha, 1);
-assert.equal(LIQUID_GLASS_DEFAULTS.accentAlphaMotion, 0);
-assert.equal(LIQUID_GLASS_DEFAULTS.accentAlphaCycles, 1);
-assert.equal(LIQUID_GLASS_DEFAULTS.introWordSeconds, 4.8);
-assert.equal(LIQUID_GLASS_DEFAULTS.introDimStartSeconds, 0);
-assert.equal(LIQUID_GLASS_DEFAULTS.introDimSpeed, 1);
-assert.equal(LIQUID_GLASS_DEFAULTS.introLetterScale, 1.1);
-assert.equal(LIQUID_GLASS_DEFAULTS.introAccentSeconds, 3);
-assert.equal(LIQUID_GLASS_DEFAULTS.introAccentStartOffset, 0);
-assert.equal(accentCycles(LIQUID_GLASS_DEFAULTS), 1, 'accent must animate one cycle slower than the default graphic');
-assert.equal(accentCycles({ ...LIQUID_GLASS_DEFAULTS, rippleCycles: 3 }), 2);
-assert.equal(accentCycles({ ...LIQUID_GLASS_DEFAULTS, rippleCycles: 1 }), 1);
+const latestSavedDefaults = {
+  zoom: 0.65, bg: '#000000', hexR: 0.165, density: 150, ringR: 0.475,
+  thickness: 0.475, fieldBlur: 0.175, threshold: 0.25, wave: 0.6,
+  dotAspect: 1, fieldRot: 0, dotAlpha: 1, accentAlpha: 1,
+  accentInnerAlpha: 0.41, accentOuterAlpha: 0.4, accentAlphaMotion: 1,
+  accentAlphaCycles: 6, dotBlur: 0, dotGlow: 0.25, dotGlowSize: 11,
+  gradStart: 0.15, gradLumaEven: 0, innerBright: 1.51, animA: 2,
+  rippleCycles: 2, wmSize: 0.75, wmX: 0.66, wmY: 0.51, gfxX: 0.045,
+  intro: 1, introWordSeconds: 4, introDimStartSeconds: 1.5, introDimSpeed: 1,
+  introLetterScale: 1.1, introAccentSeconds: 4, introAccentStartOffset: -3.8,
+  transparent: 1,
+};
+for (const [key, value] of Object.entries(latestSavedDefaults)) {
+  assert.equal(LIQUID_GLASS_DEFAULTS[key], value, `latest SAVE default mismatch: ${key}`);
+}
 
 // Accent opacity motion: OFF preserves the configured endpoints; ON smoothly swaps them and
 // returns to the exact starting state at the loop seam. Integer cycles provide loop-safe speed.
 {
-  const base = { ...LIQUID_GLASS_DEFAULTS, accentInnerAlpha: 0.2, accentOuterAlpha: 0.8 };
+  const base = { ...LIQUID_GLASS_DEFAULTS, accentInnerAlpha: 0.2, accentOuterAlpha: 0.8, accentAlphaMotion: 0 };
   assert.deepEqual(accentOpacityPair(base, 0.37), { inner: 0.2, outer: 0.8 });
   const animated = { ...base, accentAlphaMotion: 1, accentAlphaCycles: 1 };
   assert.deepEqual(accentOpacityPair(animated, 0), { inner: 0.2, outer: 1 });
@@ -114,26 +114,26 @@ assert.equal(accentCycles({ ...LIQUID_GLASS_DEFAULTS, rippleCycles: 1 }), 1);
 // Adjustable D/E durations change the real intro length.
 {
   const timing = introTiming(LIQUID_GLASS_DEFAULTS);
-  assert.equal(timing.wordSeconds, 4.8);
-  assert.equal(timing.accentSeconds, 3);
-  assert.equal(timing.accentStartOffset, 0);
-  assert.equal(timing.accentStart, 14);
-  assert.equal(timing.total, 17);
-  const custom = introTiming({ ...LIQUID_GLASS_DEFAULTS, introWordSeconds: 2.5, introAccentSeconds: 1.5 });
+  assert.equal(timing.wordSeconds, 4);
+  assert.equal(timing.accentSeconds, 4);
+  assert.equal(timing.accentStartOffset, -3.8);
+  near(timing.accentStart, 9.4);
+  near(timing.total, 13.4);
+  const custom = introTiming({ ...LIQUID_GLASS_DEFAULTS, introWordSeconds: 2.5, introAccentSeconds: 1.5, introAccentStartOffset: 0 });
   near(custom.total, 13.2);
   const overlap = introTiming({ ...LIQUID_GLASS_DEFAULTS, introAccentStartOffset: -1 });
-  assert.equal(overlap.accentStart, 13);
-  assert.equal(overlap.total, 16);
+  near(overlap.accentStart, 12.2);
+  near(overlap.total, 16.2);
   const delayed = introTiming({ ...LIQUID_GLASS_DEFAULTS, introAccentStartOffset: 1 });
-  assert.equal(delayed.accentStart, 15);
-  assert.equal(delayed.total, 18);
+  near(delayed.accentStart, 14.2);
+  near(delayed.total, 18.2);
   const particle = introTiming({ ...LIQUID_GLASS_DEFAULTS, introPattern: 2 });
   near(particle.particleMorphEnd, 6.8);
   near(particle.wordStart, 6.8);
-  near(particle.wordEnd, 11.6);
-  near(particle.graphicEnd, 14);
-  near(particle.accentStart, particle.wordEnd);
-  near(particle.total, 14.6);
+  near(particle.wordEnd, 10.8);
+  near(particle.graphicEnd, 13.2);
+  near(particle.accentStart, 7);
+  near(particle.total, 13.2);
   assert.ok(particle.wordEnd < particle.graphicEnd, 'the second graphic must appear only after the word is complete');
 }
 
@@ -154,21 +154,22 @@ assert.equal(accentCycles({ ...LIQUID_GLASS_DEFAULTS, rippleCycles: 1 }), 1);
 
 // Reference text reveal: dim glyphs lead, bright glyphs follow, both finish without a jump.
 {
-  let previous = wordmarkRevealTiming(0, LIQUID_GLASS_DEFAULTS);
+  const revealBase = { ...LIQUID_GLASS_DEFAULTS, introDimStartSeconds: 0 };
+  let previous = wordmarkRevealTiming(0, revealBase);
   assert.deepEqual(previous, { dim: 0, bright: 0 });
   for (let k = 1; k <= 100; k++) {
-    const current = wordmarkRevealTiming(k / 100, LIQUID_GLASS_DEFAULTS);
+    const current = wordmarkRevealTiming(k / 100, revealBase);
     assert.ok(current.dim >= previous.dim && current.bright >= previous.bright, 'wordmark reveal must be monotonic');
     assert.ok(current.dim + 1e-9 >= current.bright, 'dim precursor must lead the bright text');
     previous = current;
   }
-  assert.deepEqual(wordmarkRevealTiming(1, LIQUID_GLASS_DEFAULTS), { dim: 1, bright: 1 });
-  const early = wordmarkRevealTiming(0.1, LIQUID_GLASS_DEFAULTS);
+  assert.deepEqual(wordmarkRevealTiming(1, revealBase), { dim: 1, bright: 1 });
+  const early = wordmarkRevealTiming(0.1, revealBase);
   assert.ok(early.dim > early.bright && early.dim > 0, 'dim text must appear before the bright pass');
-  const delayed = { ...LIQUID_GLASS_DEFAULTS, introDimStartSeconds: 1 };
-  assert.equal(wordmarkRevealTiming(0.1, delayed).dim, 0, 'dim text must wait for its configured start time');
-  const slow = wordmarkRevealTiming(0.2, { ...LIQUID_GLASS_DEFAULTS, introDimSpeed: 0.5 }).dim;
-  const fast = wordmarkRevealTiming(0.2, { ...LIQUID_GLASS_DEFAULTS, introDimSpeed: 2 }).dim;
+  assert.equal(wordmarkRevealTiming(0.3, LIQUID_GLASS_DEFAULTS).dim, 0,
+    'latest SAVE dim layer must wait for its configured 1.5 second start');
+  const slow = wordmarkRevealTiming(0.2, { ...revealBase, introDimSpeed: 0.5 }).dim;
+  const fast = wordmarkRevealTiming(0.2, { ...revealBase, introDimSpeed: 2 }).dim;
   assert.ok(fast > slow, 'higher dim speed must reveal the precursor faster');
 }
 
@@ -283,16 +284,16 @@ function context() {
 globalThis.document = { createElement() { return { width: 0, height: 0, getContext: () => context() }; } };
 globalThis.Path2D = class Path2D {};
 const renderer = createLiquidGlass(), canvas = context();
-assert.equal(renderer.getIntroSeconds(LIQUID_GLASS_DEFAULTS), 17);
-near(renderer.getIntroSeconds({ ...LIQUID_GLASS_DEFAULTS, introWordSeconds: 2.5, introAccentSeconds: 1.5 }), 13.2);
-near(renderer.getIntroSeconds({ ...LIQUID_GLASS_DEFAULTS, introPattern: 2 }), 14.6);
+near(renderer.getIntroSeconds(LIQUID_GLASS_DEFAULTS), 13.4);
+near(renderer.getIntroSeconds({ ...LIQUID_GLASS_DEFAULTS, introWordSeconds: 2.5, introAccentSeconds: 1.5, introAccentStartOffset: 0 }), 13.2);
+near(renderer.getIntroSeconds({ ...LIQUID_GLASS_DEFAULTS, introPattern: 2 }), 13.2);
 function render(p, phase, size = 720) { for (const c of contexts) c.dots = []; renderer.render(canvas, size, size, phase, p); return contexts.flatMap(c => c.dots); }
 const flat = { ...params, dotGlow: 0, dotBlur: 0 };
 const key = d => `${d.x.toFixed(2)},${d.y.toFixed(2)}`;
 
 // Exercise the three edited intro regions with the Canvas path: A=initial mode 5, B=fade-out,
 // D=two-layer wordmark reveal. This is a low-cost runtime guard, not a visual approval.
-for (const t01 of [0.15, 0.35, 0.65]) {
+for (const t01 of [0.15, 0.35, 0.75, 0.9]) {
   renderer.renderIntro(canvas, 720, 720, t01, 0.2, { ...flat, wordmark: 1, introPattern: 1 });
 }
 for (const t01 of [0.4, 0.55, 0.72, 0.9]) {
@@ -341,7 +342,7 @@ for (const phase of [0, 0.125, 0.5, 0.875]) {
 const withWord = { ...params, wordmark: 1 };
 function accentFills(svg) {
   return [...svg.matchAll(/<path d="[^"]*" fill="(url\(#[^)]+\)|#[^"]+)"(?: opacity="[^"]+")?\/>/g)]
-    .map(m => m[1].toLowerCase()).filter(f => f !== '#000000');
+    .map(m => m[1].toLowerCase()).filter(fill => fill.startsWith('url('));
 }
 function gradientStops(svg, id) {
   const body = svg.match(new RegExp(`<linearGradient id="${id}"[^>]*>(.*?)<\\/linearGradient>`))?.[1] ?? '';
@@ -363,37 +364,61 @@ function accentState(p, phase) {
     rightOpacity: gradientOpacities(svg, 'mood-accent-right'),
   };
 }
-for (const motion of [1, 2, 3, 4, 5]) {
-  const start = accentState({ ...withWord, motion }, 0);
-  const { fills, left, right } = accentState({ ...withWord, motion }, 0.125);
-  const end = accentState({ ...withWord, motion }, 1);
-  assert.deepEqual(fills, ['url(#mood-accent-right)', 'url(#mood-accent-right)', 'url(#mood-accent-left)', 'url(#mood-accent-left)']);
-  assert.equal(left.length, 3, `motion ${motion} left accent must have 3 gradient stops`);
-  assert.equal(right.length, 3, `motion ${motion} right accent must have 3 gradient stops`);
-  assert.notDeepEqual(start.left, left, `motion ${motion} accent must animate continuously`);
-  assert.deepEqual(start.left, end.left, `motion ${motion} accent must loop seamlessly`);
-}
-for (const dotSource of ['solid', 'blob', 'gradient', 'gradient3']) {
-  const start = accentState({ ...withWord, dotSource }, 0);
-  const moved = accentState({ ...withWord, dotSource }, 0.125);
-  assert.notDeepEqual(start.left, moved.left, `${dotSource} accent must stay animated`);
-}
-const BLUE = '#3d6bff';
 const rgb = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16));
+const rgbHex = color => '#' + color.map(value => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, '0')).join('');
+function expectedGraphicSamples(p, phase) {
+  const [innerSr, outerSr] = gradWindow(p);
+  const radii = [innerSr, (innerSr + outerSr) / 2, outerSr];
+  const base = rgb(p.dotColor);
+  const base2 = innerRgb(p);
+  const base3 = rgb(p.dotColor3);
+  return radii.map(sr => {
+    const swapRev = p.motion === 5 && p.inflow > 0
+      ? Math.max(0, Math.min(1, p.inflow)) * (0.5 + 0.5 * ripplePhase(sr, phase, p))
+      : 0;
+    return rgbHex(applyDotAppearance(gradientRgb(sr, 1, base2, base3, base, p, swapRev), sr, p));
+  });
+}
+function assertAccentMatchesGraphic(p, phase) {
+  const state = accentState(p, phase);
+  const expected = expectedGraphicSamples(p, phase);
+  assert.deepEqual(state.fills, ['url(#mood-accent-right)', 'url(#mood-accent-right)', 'url(#mood-accent-left)', 'url(#mood-accent-left)']);
+  assert.deepEqual(state.right.map(stop => stop[0]), [0, 0.5, 1]);
+  assert.deepEqual(state.left.map(stop => stop[0]), [0, 0.5, 1]);
+  assert.deepEqual(state.right.map(stop => stop[1]), expected, `right accent must match graphic inner→outer samples at phase ${phase}`);
+  assert.deepEqual(state.left.map(stop => stop[1]), [...expected].reverse(), `left accent must mirror graphic outer→inner samples at phase ${phase}`);
+  return state;
+}
+
+// Static motions keep the same inner/middle/outer mapping; motion 5 uses the exact same
+// radial ripple phase and inflow amplitude as the graphic.
+for (const motion of [1, 2, 3, 4]) {
+  const p = { ...withWord, motion };
+  const start = assertAccentMatchesGraphic(p, 0);
+  const moved = assertAccentMatchesGraphic(p, 0.375);
+  assert.deepEqual(start.left, moved.left, `motion ${motion} must not invent accent colour motion`);
+}
+for (const phase of [0, 0.125, 0.37, 0.5, 0.875, 1]) {
+  assertAccentMatchesGraphic({ ...withWord, motion: 5 }, phase);
+}
+
+// A 2-colour gradient must ignore dotColor3 in both the graphic and the accent. A 3-colour
+// gradient must use it, proving the logo follows the selected graphic colour source.
+const twoA = accentState({ ...withWord, dotSource: 'gradient', dotColor3: '#ff0000' }, 0.23);
+const twoB = accentState({ ...withWord, dotSource: 'gradient', dotColor3: '#00ff00' }, 0.23);
+assert.deepEqual(twoA.left, twoB.left, '2-colour accent must not introduce dotColor3');
+const threeA = accentState({ ...withWord, dotSource: 'gradient3', dotColor3: '#ff0000' }, 0.23);
+const threeB = accentState({ ...withWord, dotSource: 'gradient3', dotColor3: '#00ff00' }, 0.23);
+assert.notDeepEqual(threeA.left, threeB.left, '3-colour accent must follow dotColor3');
+
 const colourDelta = (a, b) => Math.max(...rgb(a).map((v, i) => Math.abs(v - rgb(b)[i])));
-// Every phase keeps a continuous outer↔middle↔inner gradient. Fine-grained adjacent samples must
-// move by only a few RGB values; this catches the former boolean direction flip as a large jump.
+// Fine-grained adjacent samples remain continuous while using the shared graphic clock.
 const seenOuter = new Set();
 let previousLeft = null;
 let maxAccentStep = 0;
 for (let k = 0; k <= 240; k++) {
   const phase = k / 240;
-  const { fills, left, right } = accentState({ ...withWord, motion: 5 }, phase);
-  assert.deepEqual(fills, ['url(#mood-accent-right)', 'url(#mood-accent-right)', 'url(#mood-accent-left)', 'url(#mood-accent-left)']);
-  assert.deepEqual(left.map(s => s[0]), [0, 0.5, 1]);
-  assert.deepEqual(right.map(s => s[0]), [0, 0.5, 1]);
-  assert.deepEqual(left.map(s => s[1]), [...right].reverse().map(s => s[1]), `left/right gradients must mirror at phase ${phase.toFixed(3)}`);
-  assert.equal(left[1][1], BLUE, 'gradient midpoint must stay blue');
+  const { left } = assertAccentMatchesGraphic({ ...withWord, motion: 5 }, phase);
   if (previousLeft) {
     maxAccentStep = Math.max(
       maxAccentStep,
@@ -405,19 +430,20 @@ for (let k = 0; k <= 240; k++) {
   seenOuter.add(left[0][1]);
 }
 assert.ok(seenOuter.size > 40, `accent must move through many intermediate colours, saw ${seenOuter.size}`);
-assert.ok(maxAccentStep <= 7, `accent motion must not jump between frames, max RGB step=${maxAccentStep}`);
+assert.ok(maxAccentStep <= 10, `accent motion must not jump between frames, max RGB step=${maxAccentStep}`);
 const seamA = accentState({ ...withWord, motion: 5 }, 0);
 const seamB = accentState({ ...withWord, motion: 5 }, 1);
 assert.deepEqual(seamA.left, seamB.left, 'accent gradient must loop seamlessly');
 assert.deepEqual(seamA.right, seamB.right, 'mirrored accent gradient must loop seamlessly');
-// Accent animation is independent of inflow: turning the graphic wave off must not stop the logo.
+// Turning the graphic wave off also stops accent colour motion; inflow is shared rather than independent.
 const noInflow = accentState({ ...withWord, motion: 5, inflow: 0 }, 0.3);
-const fullInflow = accentState({ ...withWord, motion: 5, inflow: 2 }, 0.3);
-assert.deepEqual(noInflow.left, fullInflow.left);
-assert.deepEqual(noInflow.right, fullInflow.right);
+const noInflowMoved = accentState({ ...withWord, motion: 5, inflow: 0 }, 0.7);
+const fullInflow = accentState({ ...withWord, motion: 5, inflow: 1 }, 0.3);
+assert.deepEqual(noInflow.left, noInflowMoved.left);
+assert.notDeepEqual(noInflow.left, fullInflow.left);
 
 // Inner/outer opacity controls form a mirrored transparency gradient in SVG.
-const fadedEnds = accentState({ ...withWord, accentInnerAlpha: 0.2, accentOuterAlpha: 0.8 }, 0.3);
+const fadedEnds = accentState({ ...withWord, accentInnerAlpha: 0.2, accentOuterAlpha: 0.8, accentAlphaMotion: 0 }, 0.3);
 assert.deepEqual(fadedEnds.leftOpacity, [0.8, 0.5, 0.2]);
 assert.deepEqual(fadedEnds.rightOpacity, [0.2, 0.5, 0.8]);
 
@@ -440,19 +466,24 @@ assert.ok(fadedAccent.every(([, alpha]) => +alpha === 0.35));
 // Canvas uses the same local-space axes/stops as SVG, so the colour transition continues through
 // both arcs on each side instead of restarting inside each individual path.
 canvas.gradients = [];
-render({ ...flat, wordmark: 1, motion: 5, inflow: 0 }, 0.3);
+const opaqueAccent = {
+  ...flat, wordmark: 1, motion: 5, inflow: 0,
+  accentInnerAlpha: 1, accentOuterAlpha: 1, accentAlphaMotion: 0,
+};
+render(opaqueAccent, 0.3);
 const logoGradients = canvas.gradients.filter(g => (g.x0 === 64 && g.x1 === 103) || (g.x0 === 196 && g.x1 === 231));
 assert.equal(logoGradients.length, 2);
-assert.deepEqual(logoGradients.find(g => g.x0 === 64).stops, noInflow.left);
-assert.deepEqual(logoGradients.find(g => g.x0 === 196).stops, noInflow.right);
+const opaqueState = accentState(opaqueAccent, 0.3);
+assert.deepEqual(logoGradients.find(g => g.x0 === 64).stops, opaqueState.left);
+assert.deepEqual(logoGradients.find(g => g.x0 === 196).stops, opaqueState.right);
 
 // Canvas carries the same outer↔inner alpha ramp inside each accent gradient.
 canvas.gradients = [];
-render({ ...flat, wordmark: 1, accentInnerAlpha: 0.2, accentOuterAlpha: 0.8 }, 0.3);
+render({ ...flat, wordmark: 1, accentInnerAlpha: 0.2, accentOuterAlpha: 0.8, accentAlphaMotion: 0 }, 0.3);
 const fadedCanvas = canvas.gradients.filter(g => (g.x0 === 64 && g.x1 === 103) || (g.x0 === 196 && g.x1 === 231));
 const leftFade = fadedCanvas.find(g => g.x0 === 64).stops.map(([, color]) => color);
 const rightFade = fadedCanvas.find(g => g.x0 === 196).stops.map(([, color]) => color);
 assert.ok(leftFade[0].endsWith(', 0.8)') && leftFade[2].endsWith(', 0.2)'));
 assert.ok(rightFade[0].endsWith(', 0.2)') && rightFade[2].endsWith(', 0.8)'));
 
-console.log(`PASS: adjustable dim-text timing/speed, 1–1.5x letter reveal, and signed accent start offset; pattern 2 deterministically morphs into text-coloured particles, forms the word, then reveals the second graphic; graphic motion=5 swaps teal↔violet on the gradient line (recoloured ${recoloured}/${matched}, green dots ${greenDots}, out-of-range ${outOfRange}), radial & seamless, ${cases} Canvas/SVG parity; accent = slower always-on smooth mirrored gradient across every mode/source (${seenOuter.size} colours, max RGB step ${maxAccentStep}, master plus loop-safe inner/outer opacity exchange)`);
+console.log(`PASS: latest SAVE defaults; adjustable dim-text timing/speed, 1–1.5x letter reveal, and signed accent start offset; pattern 2 deterministically morphs into text-coloured particles, forms the word, then reveals the second graphic; graphic motion=5 swaps teal↔violet on the gradient line (recoloured ${recoloured}/${matched}, green dots ${greenDots}, out-of-range ${outOfRange}), radial & seamless, ${cases} Canvas/SVG parity; accent inner/middle/outer colours match the graphic at the same radii and ripple phase (${seenOuter.size} colours, max RGB step ${maxAccentStep}, 2-colour third-stop isolation, loop-safe opacity exchange)`);

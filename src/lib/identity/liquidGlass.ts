@@ -425,7 +425,8 @@ function applyArmEven(out: Dot[], P: LiquidGlassParams) {
   }
 }
 
-// 共有リップル時計（グラフィックの色循環/透明度とアクセントの点滅を同期）。位相は sin(TAU·CYCLES·ph − K·sr)：
+// 共有リップル時計（グラフィックとワードマークアクセントの色循環を同期）。
+// 位相は sin(TAU·CYCLES·ph − K·sr)：
 // −K·sr で外向き伝播、TAU·cycles·ph の整数周期でループ継ぎ目なし。cycles はUIから1..6で調整し、
 // 少ないほど1回の波紋がゆっくり進む。K は反転(循環)が半径方向に伝播する波数：小さいほど
 // 環が広く滑らか、大きいほど反転境界が増えてバンド化しやすい。反転は gradientRgb 側で線形ミックス
@@ -435,10 +436,6 @@ const SWAP_SHADE_AMP = 0.45; // 透明度脈動（チカチカ）の振幅。参
 const rippleCycles = (P: LiquidGlassParams) => clamp(Math.round(P.rippleCycles ?? 2), 1, 6);
 const ripplePhase = (sr: number, ph: number, P: LiquidGlassParams) =>
   Math.sin(TAU * rippleCycles(P) * ph - SWAP_RIPPLE_K * sr); // 半径波 [-1,1]
-// アクセントはグラフィックより1周期少なく動かし、整数周期のループ継ぎ目を維持したまま少し遅くする。
-const accentCycles = (P: LiquidGlassParams) => Math.max(1, rippleCycles(P) - 1);
-const accentRipplePhase = (sr: number, ph: number, P: LiquidGlassParams) =>
-  Math.sin(TAU * accentCycles(P) * ph - SWAP_RIPPLE_K * sr);
 
 const motionDirection = (motion: number) => motion === 2 || motion === 5 ? -1 : 1;
 
@@ -735,47 +732,47 @@ function drawC3(
 
 // 最新の LIQUID GLASS 保存設定を初期値として固定。
 export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
-  zoom: 0.6,
-  bg: "#ffffff", // 既定＝白背景（最新save／Image #12）。濃度均一化も白背景基準で調整
-  hexR: 0.185,
+  zoom: 0.65,
+  bg: "#000000",
+  hexR: 0.165,
   hexRot: 0,
   hexSpin: 0,
   hexMask: 1,
   halftone: 1,
-  density: 89,
-  ringR: 0.585,
-  thickness: 0.37,
-  fieldBlur: 0.21,
-  threshold: 0,
+  density: 150,
+  ringR: 0.475,
+  thickness: 0.475,
+  fieldBlur: 0.175,
+  threshold: 0.25,
   frequency: 7,
-  wave: 0.64,
+  wave: 0.6,
   turbulence: 0,
   swirl: 3,
   contrast: 1.4,
   edgeFade: 1, // 外周を透明までフェード。0でフェード無効
   dotScale: 1,
-  dotAspect: 1.04,
-  fieldRot: 3,
+  dotAspect: 1,
+  fieldRot: 0,
   fieldScale: 1,
-  dotAlpha: 0.48,
+  dotAlpha: 1,
   accentAlpha: 1,
-  accentInnerAlpha: 1,
-  accentOuterAlpha: 1,
-  accentAlphaMotion: 0,
-  accentAlphaCycles: 1,
+  accentInnerAlpha: 0.41,
+  accentOuterAlpha: 0.4,
+  accentAlphaMotion: 1,
+  accentAlphaCycles: 6,
   armEven: 1, // 各アーム密度の均一化（左上の薄さを補正）
-  dotBlur: 1.2,
-  dotGlow: 0.35, // ドット層の淡い発光（Image #14 の violet アーム）。0で全経路バイト一致
-  dotGlowSize: 14, // 発光の広がり（px@1280）
+  dotBlur: 0,
+  dotGlow: 0.25,
+  dotGlowSize: 11,
   dotSource: "gradient", // 既定＝バイオレット→ティールのグラデーション（Image #8）
   dotColor: "#6a2bff", // 外側＝バイオレット（＋ワードマークのアクセント）
   dotColor2: "#17f0d9", // 内側＝やや明るい cyan 寄り teal（Image #12 の内側発色）
   dotColor3: "#3d6bff", // 3色グラデ(gradient3)の中間色。既定 gradient では未使用
-  gradStart: 0, // グラデ内側カラーの始点（0=従来どおり）
-  gradLumaEven: 0.85, // 内側→外側への明るさ追従（0.85=従来の固定値。0で内側カラーの濁りが消える）
+  gradStart: 0.15,
+  gradLumaEven: 0,
   innerHide: 0, // グラデ内側カラーの非表示（0=表示）
   gradMid: 0.5, // 3色グラデの中間色の位置（0..1）
-  innerBright: 1, // 内側ドットの明るさ倍率（1=無変換）
+  innerBright: 1.51,
   innerAlpha: 1, // 内側ドットの不透明度（1=無変換）
   outerBright: 1, // 外側ドットの明るさ倍率（1=無変換）
   toneHue: 0, // 色味調整レイヤー: 既定は全て無変換＝既存の全出力とバイト一致
@@ -783,7 +780,7 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   toneBright: 1,
   toneTint: 0,
   toneTintColor: "#ffffff",
-  animA: 1,
+  animA: 2,
   animB: 0,
   motion: 5, // 既定＝グラデ反転波（2色が波紋状に入れ替わる／アクセントも同期してチカチカ切替）
   inflow: 1.25,
@@ -795,20 +792,20 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   scale: 2,
   seed: 77,
   wordmark: 1,
-  wmSize: 0.88,
-  wmX: 0.65,
-  wmY: 0.515,
-  gfxX: 0,
+  wmSize: 0.75,
+  wmX: 0.66,
+  wmY: 0.51,
+  gfxX: 0.045,
   gfxY: 0,
-  intro: 0,
+  intro: 1,
   introPattern: 1,
-  introWordSeconds: 4.8,
-  introDimStartSeconds: 0,
+  introWordSeconds: 4,
+  introDimStartSeconds: 1.5,
   introDimSpeed: 1,
   introLetterScale: 1.1,
-  introAccentSeconds: 3,
-  introAccentStartOffset: 0,
-  transparent: 0,
+  introAccentSeconds: 4,
+  introAccentStartOffset: -3.8,
+  transparent: 1,
   circles: [
     { col: "#4b3bf5", x: -0.09, y: -0.05, r: 0.4, a: 0.9, ring: 0.52, wob: 1.0 },
     { col: "#db0000", x: 0.11, y: 0.07, r: 0.34, a: 0.8, ring: 0.6, wob: 1.4 },
@@ -1007,23 +1004,31 @@ function accentOpacityPair(P: LiquidGlassParams, phase: number) {
   };
 }
 
-// ワードマークのアクセント（「((」「))」）は、参照画像に合わせて左右対称の空間グラデーションにする。
-// 中心側=inner、外側=outer、その中間はdotColor3のブルー。ドットソースやモーションに関係なく共通とし、
-// アクセントはモーション選択やinflowに依存せず、グラフィックより少し遅い時計を0..1の連続値として常時循環する。
-// accentCyclesは整数のため、Canvas/SVG/動画の全経路でチラつかずシームレスにループする。
+// ワードマークのアクセント（「((」「))」）は、グラフィックと同じ半径位置の色を採用する。
+// 括弧の内側/中央/外側をグラフィックのグラデ窓の近端/中央/遠端に対応させ、
+// motion=5 では同じ ripplePhase/inflow から各位置のswapRevを計算する。これにより、色の種類だけでなく
+// 内外の位置と変化タイミングもCanvas/SVG/動画で一致する。2色グラデはgradientRgb内で第3色を無視する。
 function accentPalette(P: LiquidGlassParams, phase: number): MoodMetrixAccent {
-  const tealRgb = applyDotAppearance(innerRgb(P), P.ringR - 0.28, P);
-  const blueRgb = applyDotAppearance(rgbOf(P.dotColor3), P.ringR, P);
-  const violetRgb = applyDotAppearance(rgbOf(P.dotColor), P.ringR + 0.28, P);
-  const reversal = 0.5 + 0.5 * accentRipplePhase(P.ringR - 0.28, phase, P);
-  const inner = mixRgb(tealRgb, violetRgb, reversal);
-  const outer = mixRgb(violetRgb, tealRgb, reversal);
+  const base = rgbOf(P.dotColor);
+  const base2 = innerRgb(P);
+  const base3 = rgbOf(P.dotColor3);
+  const [innerSr, outerSr] = gradWindow(P);
+  const middleSr = (innerSr + outerSr) / 2;
+  const sample = (sr: number) => {
+    const swapRev = P.motion === 5 && P.inflow > 0
+      ? clamp(P.inflow, 0, 1) * (0.5 + 0.5 * ripplePhase(sr, phase, P))
+      : 0;
+    const color = isGradient(P)
+      ? gradientRgb(sr, 1, base2, base3, base, P, swapRev)
+      : base;
+    return rgbHex(applyDotAppearance(color, sr, P));
+  };
   const opacity = accentOpacityPair(P, phase);
   return {
     kind: "mirrored-gradient",
-    inner: rgbHex(inner),
-    middle: rgbHex(blueRgb),
-    outer: rgbHex(outer),
+    inner: sample(innerSr),
+    middle: sample(middleSr),
+    outer: sample(outerSr),
     innerAlpha: opacity.inner,
     outerAlpha: opacity.outer,
   };
