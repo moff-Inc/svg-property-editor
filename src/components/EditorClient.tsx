@@ -7,7 +7,7 @@ import PropertyPanel from "./PropertyPanel";
 import SaveStatus from "./SaveStatus";
 import { useAutoSave } from "@/lib/hooks/useAutoSave";
 import { serializeSvg, downloadSvg } from "@/lib/svg/serialize";
-import { exportMp4 } from "@/lib/svg/exportVideo";
+import { exportSvgVideo, type SvgVideoFormat } from "@/lib/svg/exportVideo";
 import type { EditsMap, ElementEdit } from "@/lib/svg/types";
 import "./generate/orbitype.css";
 
@@ -27,7 +27,9 @@ export default function EditorClient({
   const [edits, setEdits] = useState<EditsMap>(initialEdits);
   const [selectedEid, setSelectedEid] = useState<string | null>(null);
   const [restore, setRestore] = useState<EditsMap | null>(null);
-  const [mp4Pct, setMp4Pct] = useState<number | null>(null);
+  const [videoFormat, setVideoFormat] = useState<SvgVideoFormat>("mp4");
+  const [videoPct, setVideoPct] = useState<number | null>(null);
+  const [videoBytes, setVideoBytes] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const saveState = useAutoSave(docId, edits);
@@ -84,23 +86,27 @@ export default function EditorClient({
     downloadSvg(name, serializeSvg(svg));
   }
 
-  async function handleExportMp4() {
-    if (mp4Pct !== null) return; // 実行中は多重起動を防ぐ
-    setMp4Pct(0);
+  async function handleExportVideo() {
+    if (videoPct !== null) return; // 実行中は多重起動を防ぐ
+    setVideoPct(0);
+    setVideoBytes(0);
     try {
-      await exportMp4({
+      await exportSvgVideo({
         baseSvg,
         edits,
         name,
-        onProgress: (done, total) =>
-          setMp4Pct(Math.round((done / total) * 100)),
+        format: videoFormat,
+        onProgress: (done, total, bytes) => {
+          setVideoPct(Math.round((done / total) * 100));
+          if (bytes !== undefined) setVideoBytes(bytes);
+        },
       });
     } catch (e) {
       alert(
-        `MP4の書き出しに失敗しました:\n${e instanceof Error ? e.message : String(e)}`,
+        `${videoFormat.toUpperCase()}の書き出しに失敗しました:\n${e instanceof Error ? e.message : String(e)}`,
       );
     } finally {
-      setMp4Pct(null);
+      setVideoPct(null);
     }
   }
 
@@ -125,13 +131,26 @@ export default function EditorClient({
           <button className="gen-tbtn" onClick={handleExport}>
             SVG
           </button>
+          <select
+            className="gen-select"
+            value={videoFormat}
+            onChange={(e) => setVideoFormat(e.target.value as SvgVideoFormat)}
+            disabled={videoPct !== null}
+            aria-label="動画の書き出し形式"
+            title="MOVはSVGの透明部分を残したまま書き出します（Apple ProRes 4444）"
+          >
+            <option value="mp4">MP4</option>
+            <option value="mov">MOV / 透過</option>
+          </select>
           <button
             className="gen-export"
-            onClick={handleExportMp4}
-            disabled={mp4Pct !== null}
+            onClick={handleExportVideo}
+            disabled={videoPct !== null}
           >
             <span>
-              {mp4Pct !== null ? `書き出し中 ${mp4Pct}%` : "MP4を書き出し"}
+              {videoPct !== null
+                ? `書き出し中 ${videoPct}%${videoBytes ? ` · ${(videoBytes / 1024 / 1024).toFixed(1)}MB` : ""}`
+                : `${videoFormat.toUpperCase()}を書き出し`}
             </span>
             <svg viewBox="0 0 24 24" aria-hidden>
               <path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" />
