@@ -6,10 +6,10 @@ import path from 'node:path';
 const sourceDir = path.resolve('src/lib/identity');
 const source = await readFile(path.join(sourceDir, 'liquidGlass.ts'), 'utf8');
 const result = await build({
-  stdin: { contents: source + '\nexport { accentAlphaCycles, accentOpacityPair, accentRipple, applyDotAppearance, dotField, flowDotField, gradWindow, gradientRgb, innerRgb, introGraphicParams, introParticleParams, introTiming, motionDirection, ripplePhase, wordmarkLetterScales, wordmarkRevealTiming };', resolveDir: sourceDir, loader: 'ts' },
+  stdin: { contents: source + '\nexport { accentAlphaCycles, accentOpacityPair, accentRipple, applyDotAppearance, dotField, flowDotField, gradWindow, gradientRgb, innerRgb, introGraphicParams, introParticleParams, introSlidePosition, introSlideProgress, introTrailSamples, introTiming, motionDirection, ripplePhase, wordmarkLetterScales, wordmarkRevealTiming };', resolveDir: sourceDir, loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm',
 });
-const { accentAlphaCycles, accentOpacityPair, accentRipple, applyDotAppearance, dotField, flowDotField, gradWindow, gradientRgb, innerRgb, introGraphicParams, introParticleParams, introTiming, motionDirection, ripplePhase, wordmarkLetterScales, wordmarkRevealTiming, createLiquidGlass, LIQUID_GLASS_DEFAULTS } = await import(
+const { accentAlphaCycles, accentOpacityPair, accentRipple, applyDotAppearance, dotField, flowDotField, gradWindow, gradientRgb, innerRgb, introGraphicParams, introParticleParams, introSlidePosition, introSlideProgress, introTrailSamples, introTiming, motionDirection, ripplePhase, wordmarkLetterScales, wordmarkRevealTiming, createLiquidGlass, LIQUID_GLASS_DEFAULTS } = await import(
   `data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 
 const params = { ...LIQUID_GLASS_DEFAULTS, wordmark: 0 }; // gradient source by default
@@ -27,6 +27,7 @@ const latestSavedDefaults = {
   rippleCycles: 2, wmSize: 0.75, wmX: 0.66, wmY: 0.51, gfxX: 0.045,
   intro: 1, introWordSeconds: 4, introDimStartSeconds: 1.5, introDimSpeed: 1,
   introLetterScale: 1.1, introAccentSeconds: 4, introAccentStartOffset: -3.8,
+  introOutlineMode: 1, introOutlineColor: '',
   transparent: 1,
 };
 for (const [key, value] of Object.entries(latestSavedDefaults)) {
@@ -117,6 +118,7 @@ for (const [key, value] of Object.entries(latestSavedDefaults)) {
   assert.equal(timing.wordSeconds, 4);
   assert.equal(timing.accentSeconds, 4);
   assert.equal(timing.accentStartOffset, -3.8);
+  near(timing.wordStart, timing.motionStart);
   near(timing.accentStart, 9.4);
   near(timing.total, 13.4);
   const custom = introTiming({ ...LIQUID_GLASS_DEFAULTS, introWordSeconds: 2.5, introAccentSeconds: 1.5, introAccentStartOffset: 0 });
@@ -135,6 +137,25 @@ for (const [key, value] of Object.entries(latestSavedDefaults)) {
   near(particle.accentStart, 7);
   near(particle.total, 13.2);
   assert.ok(particle.wordEnd < particle.graphicEnd, 'the second graphic must appear only after the word is complete');
+}
+
+// Pattern 1 slide: the graphic stays visible from the center to its final position, while
+// the five afterimages fade in/out around the moving head rather than leaving a resting shadow.
+{
+  const timing = introTiming(LIQUID_GLASS_DEFAULTS);
+  const center = { gx: 100, gy: 40 }, final = { gx: -20, gy: 60 };
+  assert.equal(introSlideProgress(5.2, timing), 0);
+  assert.equal(introSlideProgress(timing.motionStart, timing), 1);
+  assert.deepEqual(introSlidePosition(center, final, 0), { gx: 100, gy: 40, progress: 0 });
+  assert.deepEqual(introSlidePosition(center, final, 1), { gx: -20, gy: 60, progress: 1 });
+  const middle = introSlidePosition(center, final, 0.5);
+  assert.ok(middle.gx < center.gx && middle.gx > final.gx, 'slide must move monotonically toward the final graphic position');
+  assert.equal(introTrailSamples(0).length, 7);
+  assert.equal(introTrailSamples(1).length, 7);
+  assert.ok(introTrailSamples(0).every(sample => sample.alpha === 0));
+  assert.ok(introTrailSamples(1).every(sample => sample.alpha === 0));
+  assert.ok(introTrailSamples(0.5).some(sample => sample.alpha > 0), 'slide must leave a faint afterimage');
+  assert.ok(introTrailSamples(0.5).every(sample => sample.blur > 0), 'slide afterimages must carry a blur radius');
 }
 
 // Intro section E finishes after exactly the second visible accent ripple and connects at alpha=1.
@@ -266,8 +287,9 @@ const contexts = [];
 function context() {
   const ctx = {
     dots: [], gradients: [], fillStyle: '', globalAlpha: 1,
+    globalCompositeOperation: 'source-over', filter: 'none', lineWidth: 1, strokeStyle: '',
     save() {}, restore() {}, setTransform() {}, scale() {}, translate() {},
-    clearRect() { this.dots = []; }, fillRect() {},
+    clearRect() { this.dots = []; }, fillRect() {}, setLineDash() {}, stroke() {},
     beginPath() {}, moveTo() {}, lineTo() {}, closePath() {}, fill() {}, drawImage() {},
     createRadialGradient() { return { addColorStop() {} }; },
     createLinearGradient(x0, y0, x1, y1) {
@@ -291,9 +313,9 @@ function render(p, phase, size = 720) { for (const c of contexts) c.dots = []; r
 const flat = { ...params, dotGlow: 0, dotBlur: 0 };
 const key = d => `${d.x.toFixed(2)},${d.y.toFixed(2)}`;
 
-// Exercise the three edited intro regions with the Canvas path: A=initial mode 5, B=fade-out,
-// D=two-layer wordmark reveal. This is a low-cost runtime guard, not a visual approval.
-for (const t01 of [0.15, 0.35, 0.75, 0.9]) {
+// Exercise the edited intro regions with the Canvas path: A=initial field, B+C=pattern 1 slide,
+// and pattern 2 particle/wordmark flow. This is a low-cost runtime guard, not a visual approval.
+for (const t01 of [0.15, 0.35, 0.45, 0.55, 0.65, 0.9]) {
   renderer.renderIntro(canvas, 720, 720, t01, 0.2, { ...flat, wordmark: 1, introPattern: 1 });
 }
 for (const t01 of [0.4, 0.55, 0.72, 0.9]) {
@@ -301,11 +323,14 @@ for (const t01 of [0.4, 0.55, 0.72, 0.9]) {
 }
 const introGradients = contexts.flatMap(c => c.gradients);
 assert.ok(introGradients.some(g => g.x0 === 64 && g.x1 === 103), 'intro wordmark must render its mirrored colour gradient');
-const introMasks = introGradients.filter(g => g.x0 !== 64 && g.x0 !== 196);
+const introMasks = introGradients.filter(g => g.stops.some(([, color]) => /rgba\(0,\s*0,\s*0/.test(color)));
 assert.ok(introMasks.length >= 2, 'intro wordmark must render dim and bright reveal masks');
 const introMaskWidths = introMasks.map(g => Math.abs(g.x1 - g.x0));
 assert.ok(Math.max(...introMaskWidths) > Math.min(...introMaskWidths) * 3,
   'dim precursor must use a much longer alpha gradient than the bright pass');
+const maskDirection = (gradient) => gradient.stops.map(([, color]) => /rgba\(0,\s*0,\s*0,\s*0\)/.test(color));
+assert.ok(introMasks.some(g => !maskDirection(g)[0] && maskDirection(g)[1]),
+  'pattern 1 wordmark must reveal from the leading/left side');
 // Swap recolours a band of dots vs standard, AND never introduces a 3rd colour: every saturated
 // dot hue stays within the teal(≈174°)→violet(≈264°) gradient range — no green (hue<170).
 const std = render({ ...flat, motion: 1 }, 0.75);

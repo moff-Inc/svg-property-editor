@@ -171,6 +171,27 @@ export function drawMoodMetrix(
   ctx.restore();
 }
 
+// 文字/アクセントの外周だけを描く。Stroke Text の導入段階で、塗りの前段に使用する。
+export function drawMoodMetrixOutline(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  scale: number,
+  color: string,
+  lineWidth = 1.2,
+) {
+  const p = paths();
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(scale, scale);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth / Math.max(0.001, scale);
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  for (const path of [...p.letters, ...p.accent, ...p.mark]) ctx.stroke(path);
+  ctx.restore();
+}
+
 // SVG 出力用。<g> でまとめた文字列を返す（イラレ編集可）。
 export function moodMetrixSvg(
   x: number,

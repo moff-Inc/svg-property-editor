@@ -18,6 +18,7 @@ import type { CanvasRenderer, ControlsSpec, Params } from "./types";
 import { hexagonDistance, hexDotWeight } from "./hexGeometry";
 import {
   drawMoodMetrix,
+  drawMoodMetrixOutline,
   moodMetrixSvg,
   LOGO_W,
   LOGO_H,
@@ -107,6 +108,8 @@ export interface LiquidGlassParams {
   gfxY?: number; // 縦方向のずらし（キャンバス高比。+で下）
   intro?: number; // 導入（出現）アニメ: 0=なし, 1=渦の集結→出現→ロゴ
   introPattern?: number; // 導入パターン: 1=文字順フェード, 2=粒子流動＋文字形成
+  introOutlineMode?: number; // 文字外線: 1=書き込み, 2=即時表示
+  introOutlineColor?: string; // 文字外線色。空欄ならグラフィック外側色に連動
   introWordSeconds: number; // 導入D: 文字出現アニメーションの長さ（秒）
   introDimStartSeconds: number; // 導入D: 薄い先行文字の開始時間（文字開始からの秒）
   introDimSpeed: number; // 導入D: 薄い先行文字の出現速度（1=従来速度）
@@ -799,6 +802,8 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   gfxY: 0,
   intro: 1,
   introPattern: 1,
+  introOutlineMode: 1,
+  introOutlineColor: "",
   introWordSeconds: 4,
   introDimStartSeconds: 1.5,
   introDimSpeed: 1,
@@ -949,7 +954,9 @@ export const LIQUID_GLASS_CONTROLS: ControlsSpec = [
     "導入 / INTRO",
     [
       ["intro", "導入アニメ（渦の集結→出現→ロゴ）", "c"],
-      ["introPattern", "ロゴ出現パターン", "o", [["1", "文字順フェード（左→右）"], ["2", "粒子流動＋文字形成"]]],
+      ["introPattern", "ロゴ出現パターン", "o", [["1", "連続スライド＋左→右リビール"], ["2", "粒子流動＋文字形成"]]],
+      ["introOutlineMode", "文字外線の出現", "o", [["1", "書き込み（Stroke Text）"], ["2", "即時表示"]]],
+      ["introOutlineColor", "初期文字外線カラー（空欄=外側色）", "k"],
       ["introWordSeconds", "文字出現時間", "r", 0.5, 10, 0.1, "秒"],
       ["introDimStartSeconds", "薄い文字の開始時間", "r", 0, 10, 0.1, "秒"],
       ["introDimSpeed", "薄い文字の出現速度", "r", 0.25, 4, 0.05, "×"],
@@ -1201,6 +1208,42 @@ function introTiming(P: LiquidGlassParams) {
   };
 }
 
+// パターン1の移動区間。A終了時の中央から、B+C終了時の最終配置まで連続的に移動する。
+function introSlideProgress(elapsed: number, timing: ReturnType<typeof introTiming>) {
+  return clamp((elapsed - INTRO_A) / Math.max(0.001, timing.motionStart - INTRO_A), 0, 1);
+}
+
+function introSlidePosition(
+  center: { gx: number; gy: number },
+  final: { gx: number; gy: number },
+  progress: number,
+) {
+  const move = smoother(progress);
+  return {
+    gx: center.gx + (final.gx - center.gx) * move,
+    gy: center.gy + (final.gy - center.gy) * move,
+    progress: move,
+  };
+}
+
+const INTRO_TRAIL_COUNT = 7;
+const INTRO_TRAIL_LAG = 0.32;
+
+function introTrailSamples(progress: number, linger = 0) {
+  const raw = clamp(progress, 0, 1);
+  const move = smoother(raw);
+  const envelope = move * (1 - move) + clamp(linger, 0, 1) * move;
+  return Array.from({ length: INTRO_TRAIL_COUNT }, (_, index) => {
+    const distance = (INTRO_TRAIL_COUNT - index) / (INTRO_TRAIL_COUNT + 1) * INTRO_TRAIL_LAG;
+    const sample = Math.max(0, raw - distance);
+    return {
+      progress: sample,
+      alpha: envelope * (0.16 * (index + 1) / INTRO_TRAIL_COUNT) * (1 + clamp(linger, 0, 1) * 1.5),
+      blur: 6 + (INTRO_TRAIL_COUNT - index) * 2,
+    };
+  });
+}
+
 // アクセント「((」「))」の明滅的な波紋。内側リング先行→外側リング遅延＝両側とも外向きに伝播。
 // 返り値は ACCENT パス順 [右内, 右外, 左内, 左外] の不透明度（左右対称）。乱数不使用＝書き出しも同一。
 // 端点は必ず1（e=0: D終端＝点灯／e=1: ループ側＝点灯 と連続）。中間は波が外へ流れつつ明滅。
@@ -1223,8 +1266,8 @@ function accentRipple(e: number): number[] {
 }
 
 // 区間A(中心で出現): 各ドットを、外周→中心の順に一粒ずつ透明→不透明でフェードイン
-// （＝ポポポと湧く。出現順のみ制御し、位置は場に従う）。場(motion5)は逆方向・3周で
-// 回転し続けるため、回転はそのまま継続する。出現順は半径 sr が大きい(外周)ほど先、
+// （＝ポポポと湧く。出現順のみ制御し、位置は場に従う）。選択中の場の動きをそのまま
+// 継続する。出現順は半径 sr が大きい(外周)ほど先、
 // 小さい(中心寄り)ほど後。per-dot ハッシュで粒立ち。tA=0 で全ドット透明＝完全な黒、
 // tA=1 で全ドット不透明＝初期登場用 drawC3 と厳密一致（区間B の開始フレームと連続）。
 // 呼び出し側が drawC3 と同じ「中央 H×H 正方形」の ctx を渡す（W=H=正方形の一辺）。
@@ -1240,7 +1283,8 @@ function drawIntroReveal(
   P: LiquidGlassParams,
   cache: LayerCache, // 発光(グロー)合成用
 ) {
-  const introP = introGraphicParams(P);
+  // モード1は選択中のフィールドをA〜Cで共用し、形状を変形させず接続する。モード2は従来の初期用パラメータを使う。
+  const introP = Number(P.introPattern) === 1 ? P : introGraphicParams(P);
   const field = dotField(introP, phase);
   const u = H * 0.395 * P.zoom * P.fieldScale; // drawC3(正方形の一辺=H) と同一
   const cellPx = spacingPx(P, u);
@@ -1424,16 +1468,17 @@ function wordmarkRevealTiming(progress: number, P: LiquidGlassParams) {
   };
 }
 
-// 左から文字が見え始める瞬間だけ1.1倍にし、その後すぐ等倍へ戻す。
-// LETTERS配列の並びではなく、実際のx座標から開始時刻を決めるため二段組でも左→右に揃う。
-function wordmarkLetterScales(progress: number, P: LiquidGlassParams): number[] {
+// 文字が見え始める瞬間だけ1.1倍にし、その後すぐ等倍へ戻す。reverse時は右→左の順序に反転する。
+// LETTERS配列の並びではなく、実際のx座標から開始時刻を決めるため二段組でも左右の順序が揃う。
+function wordmarkLetterScales(progress: number, P: LiquidGlassParams, reverse = false): number[] {
   const p = clamp(progress, 0, 1);
   const peak = clamp(P.introLetterScale ?? 1.1, 1, 1.5);
   const xs = MOOD_METRIX_LETTER_CENTERS.map(([x]) => x);
   const minX = Math.min(...xs);
   const span = Math.max(1, Math.max(...xs) - minX);
   return xs.map((x) => {
-    const start = 0.02 + ((x - minX) / span) * 0.24;
+    const rank = reverse ? (Math.max(...xs) - x) / span : (x - minX) / span;
+    const start = 0.02 + rank * 0.24;
     const local = clamp((p - start) / 0.14, 0, 1);
     if (local <= 0 || local >= 1) return 1;
     return 1 + (peak - 1) * (1 - smoother(local));
@@ -1451,6 +1496,7 @@ function drawMaskedWordmarkLayer(
   featherRatio: number,
   cacheKey: string,
   cache: LayerCache,
+  reverse = false,
 ) {
   if (progress <= 0 || opacity <= 0) return;
   const layer = cache.get(cacheKey, W, H);
@@ -1463,10 +1509,15 @@ function drawMaskedWordmarkLayer(
   x.globalCompositeOperation = "destination-in";
   const span = LOGO_W * L.wmScale;
   const feather = Math.max(6, span * featherRatio);
-  const front = L.wx - feather + clamp(progress, 0, 1) * (span + 2 * feather);
-  const mask = x.createLinearGradient(front - feather, 0, front, 0);
-  mask.addColorStop(0, "rgba(0,0,0,1)");
-  mask.addColorStop(1, "rgba(0,0,0,0)");
+  const move = clamp(progress, 0, 1);
+  const front = reverse
+    ? L.wx + span + feather - move * (span + 2 * feather)
+    : L.wx - feather + move * (span + 2 * feather);
+  const mask = reverse
+    ? x.createLinearGradient(front, 0, front + feather, 0)
+    : x.createLinearGradient(front - feather, 0, front, 0);
+  mask.addColorStop(0, reverse ? "rgba(0,0,0,0)" : "rgba(0,0,0,1)");
+  mask.addColorStop(1, reverse ? "rgba(0,0,0,1)" : "rgba(0,0,0,0)");
   x.fillStyle = mask;
   x.fillRect(0, 0, W, H);
   x.globalCompositeOperation = "source-over";
@@ -1487,6 +1538,7 @@ function drawWordmarkReveal(
   progress: number,
   introAccentAlpha: number | number[],
   cache: LayerCache,
+  reverse = false,
 ) {
   const source = cache.get("introWmSource", W, H);
   const sx = source.x;
@@ -1494,20 +1546,73 @@ function drawWordmarkReveal(
   sx.globalAlpha = 1;
   sx.globalCompositeOperation = "source-over";
   sx.clearRect(0, 0, W, H);
+  const palette = accentPalette(P, phase);
+  const linkedOutlineColor = typeof palette === "object" && !Array.isArray(palette)
+    ? palette.outer
+    : rgbHex(rgbOf(P.dotColor));
+  const outlineColor = P.introOutlineColor?.trim() || linkedOutlineColor;
+  const outline = cache.get("introWmOutlineSource", W, H);
+  drawMoodMetrixOutline(outline.x, L.wx, L.wy, L.wmScale, outlineColor);
+  const outlineWrite = Number(P.introOutlineMode ?? 1) === 1;
+  const outlineDuration = 0.32;
+  const outlineProgress = outlineWrite ? clamp(progress / outlineDuration, 0, 1) : 1;
+  const fillProgress = outlineWrite
+    ? clamp((progress - outlineDuration) / (1 - outlineDuration), 0, 1)
+    : progress;
+  if (outlineWrite) {
+    // 外線を完全に書き上げてから、白い塗りを開始する。
+    drawMaskedWordmarkLayer(c, W, H, L, outline.c, outlineProgress, 0.92, 0.14, "introWmOutlineMask", cache, reverse);
+  } else {
+    c.globalAlpha = 0.92;
+    c.drawImage(outline.c, 0, 0);
+    c.globalAlpha = 1;
+  }
   drawMoodMetrix(
     sx,
     L.wx,
     L.wy,
     L.wmScale,
-    accentPalette(P, phase),
+    palette,
     ink,
     introAccentAlpha,
-    wordmarkLetterScales(progress, P),
+    wordmarkLetterScales(fillProgress, P, reverse),
   );
-  const timing = wordmarkRevealTiming(progress, P);
-  // 先行層は長いアルファ勾配で、不透明な既出文字から進行方向へ徐々に透明化する。
-  drawMaskedWordmarkLayer(c, W, H, L, source.c, timing.dim, 0.28, 0.3, "introWmDim", cache);
-  drawMaskedWordmarkLayer(c, W, H, L, source.c, timing.bright, 1, 0.055, "introWmBright", cache);
+  const timing = wordmarkRevealTiming(fillProgress, P);
+  // 先行層は長いアルファ勾配で、進行方向に応じて文字を徐々に表示する。
+  drawMaskedWordmarkLayer(c, W, H, L, source.c, timing.dim, 0.28, 0.3, "introWmDim", cache, reverse);
+  drawMaskedWordmarkLayer(c, W, H, L, source.c, timing.bright, 1, 0.055, "introWmBright", cache, reverse);
+}
+
+function drawIntroSlide(
+  c: CanvasRenderingContext2D,
+  W: number,
+  H: number,
+  L: ReturnType<typeof lockupLayout>,
+  P: LiquidGlassParams,
+  phase: number,
+  progress: number,
+  cache: LayerCache,
+  linger = 0,
+) {
+  const center = introCenterLayout(W, H, P);
+  const position = introSlidePosition(center, L, progress);
+  const g = cache.get("introSlideGfx", L.D, L.D);
+  // 移動中はAで出現した同じフィールドを使い、粒子の形状を補間しない。
+  drawC3(g.x, L.D, L.D, phase, { ...P, transparent: 1 }, cache);
+
+  // 残像は複数の濃い色・大ぼかし層を煙のように重ね、移動経路を明確に残す。
+  const trailLayer = cache.get("introSlideTrail", W, H);
+  for (const trail of introTrailSamples(progress, linger)) {
+    const trailPosition = introSlidePosition(center, L, trail.progress);
+    trailLayer.x.globalAlpha = Math.min(0.075, trail.alpha * 0.7);
+    trailLayer.x.filter = `blur(${trail.blur * 2.2}px)`;
+    trailLayer.x.drawImage(g.c, trailPosition.gx, trailPosition.gy);
+  }
+  trailLayer.x.filter = "none";
+  c.globalAlpha = 1;
+  c.drawImage(trailLayer.c, 0, 0);
+  c.globalAlpha = 1;
+  c.drawImage(g.c, position.gx, position.gy);
 }
 
 // 導入1フレーム。t01=導入進行(0..1)、phase=通常ループ位相（連続で渡す）。
@@ -1555,6 +1660,14 @@ function renderLiquidGlassIntro(
   const showWord = P.wordmark == null ? true : !!P.wordmark;
   const L = lockupLayout(W, H, showWord, P);
   const ink = inkFor(P.bg);
+
+  // パターン1: 中央の初期グラフィックを消さず、B+Cの間で最終配置までスライドする。
+  // 第二地点へ到着するまではグラフィックだけを移動させる。
+  if (!isFlowPattern && elapsed < timing.motionStart) {
+    const slideProgress = introSlideProgress(elapsed, timing);
+    drawIntroSlide(c, W, H, L, P, graphicPhase, slideProgress, cache);
+    return;
+  }
 
   // パターン2: 初期グラフィックを中央で滑らかな粒子群へ変形し、文字色へ遷移。
   if (isFlowPattern && showWord && elapsed < timing.graphicEnd) {
@@ -1646,6 +1759,16 @@ function renderLiquidGlassIntro(
     c.globalAlpha = 1;
     return;
   }
+  // D: 第二地点への到着後にロゴを左→右へ出現させる。到着グラフィックは一度だけ描く。
+  if (!isFlowPattern && t < bD) {
+    const w = clamp((elapsed - timing.wordStart) / timing.wordSeconds, 0, 1);
+    const arrived = cache.get("introArrivedGfx", L.D, L.D);
+    drawC3(arrived.x, L.D, L.D, graphicPhase, { ...P, transparent: 1 }, cache);
+    c.drawImage(arrived.c, L.gx, L.gy);
+    drawWordmarkReveal(c, W, H, L, P, graphicPhase, ink, w, introAccentAlpha, cache);
+    return;
+  }
+
   // C/D/E: 選択中モーションを「現在の場所」で再出現。ワードマーク表示なら左寄せ、
   // 非表示なら中央（＝通常ループと同じ配置。終端が render と一致する）。
   const g = cache.get("introGfx", L.D, L.D);
@@ -1656,12 +1779,6 @@ function renderLiquidGlassIntro(
   // ワードマーク非表示なら D/E のロゴ演出はスキップ（C以降はグラフィックのみを保持）。
   if (t < bC || !showWord) return;
 
-  // D: パターン1のロゴ出現（低輝度→白の文字順フェード）。
-  if (t < bD) {
-    const w = clamp((t - bC) / (bD - bC), 0, 1);
-    drawWordmarkReveal(c, W, H, L, P, graphicPhase, ink, w, introAccentAlpha, cache);
-    return;
-  }
   // E: 文字完了を0とした開始オフセットで、アクセントのみ明滅波紋。
   // オフセットが負ならDと重なり、正なら完成ロゴを保持してから開始する。
   drawMoodMetrix(
