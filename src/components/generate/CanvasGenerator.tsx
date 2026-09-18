@@ -94,6 +94,7 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
     }
     return { ...baseMode.defaults, ...init };
   });
+  const modeParamsRef = useRef<Record<string, Params>>({});
   const [name, setName] = useState(initial?.name ?? content.title);
   const [genId, setGenId] = useState<string | null>(initial?.id ?? null);
   const [saving, setSaving] = useState(false);
@@ -128,8 +129,10 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
   const timeRef = useRef<HTMLSpanElement>(null);
   useEffect(() => {
     paramsRef.current = params;
+    modeParamsRef.current[mode] = { ...params };
     playingRef.current = playing;
     loopRef.current = loopSeconds;
+    rendererRef.current?.setPlaying?.(playing);
   }, [params, playing, loopSeconds]);
 
   useEffect(() => {
@@ -192,9 +195,14 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
   function switchMode(v: string) {
     const m = content.modes.find((x) => x.value === v);
     if (!m) return;
+    modeParamsRef.current[mode] = { ...paramsRef.current };
     setMode(v);
-    setParams({ ...m.defaults });
+    const nextParams = modeParamsRef.current[v] ?? { ...m.defaults };
+    paramsRef.current = nextParams;
+    setParams(nextParams);
     rendererRef.current = m.create();
+    rendererRef.current.setPlaying?.(playingRef.current);
+    if (m.value === "mock-preview") setLoopSeconds(20);
     phaseRef.current = 0;
     introActiveRef.current = false;
     introElapsedRef.current = 0;
@@ -213,7 +221,12 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
   }
 
   function applyPatch(patch: Params) {
-    setParams((prev) => ({ ...prev, ...patch }));
+    setParams((prev) => {
+      const next = { ...prev, ...patch };
+      paramsRef.current = next;
+      modeParamsRef.current[mode] = next;
+      return next;
+    });
     setSaved(false);
   }
 
@@ -222,6 +235,7 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
     introActiveRef.current = false; // 手動シーク時は導入を打ち切りループを表示
     // スライダーは [0,1] に制限済み。右端(1)で 0 へ折り返さないよう wrap ではなく clamp。
     phaseRef.current = Math.min(Math.max(v, 0), 1);
+    rendererRef.current?.seek?.(phaseRef.current);
     if (playingRef.current) {
       playingRef.current = false;
       setPlaying(false);
@@ -272,13 +286,14 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
       // 導入アニメ ON（intro=1 かつ対応レンダラ）のときは動画先頭に一度含める。
       const introOn =
         Boolean((exportParams as Record<string, unknown>).intro) && !!r.renderIntro && introSecs > 0;
+      const exportLoopSeconds = isMockPreview ? 20 : loopSeconds;
       await exportCanvasVideo({
         format,
         paint: (ctx, W, H, phase) => r.render(ctx, W, H, phase, exportParams),
         width: EXPORT_W,
         height: EXPORT_H,
         fps,
-        loopSeconds,
+        loopSeconds: exportLoopSeconds,
         bitrateMbps,
         name: `identity_${content.no}_${mode}`,
         onProgress: (d, t, bytes) => {
@@ -561,15 +576,16 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
             </div>
             <div className="gen-row">
               <span>ループ長</span>
-              <output>{loopSeconds}s</output>
+              <output>{isMockPreview ? 20 : loopSeconds}s</output>
               <input
                 type="range"
                 min={2}
                 max={20}
                 step={1}
-                value={loopSeconds}
-                style={fill(loopSeconds, 2, 20)}
+                value={isMockPreview ? 20 : loopSeconds}
+                style={fill(isMockPreview ? 20 : loopSeconds, 2, 20)}
                 onChange={(e) => setLoopSeconds(Number(e.target.value))}
+                disabled={isMockPreview}
               />
             </div>
             <div className="gen-field">

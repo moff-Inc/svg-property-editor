@@ -1,11 +1,5 @@
-// 05 HEX HALO + 08 LIQUID GLASS をモード切替で1コンテンツに統合。
+// 05 GRAPHIC LOGO を単一コンテンツとして提供。
 import type { MultiModeContent, Params } from "./types";
-import {
-  HEX_HALO_DEFAULTS,
-  HEX_HALO_PRESETS,
-  HEX_HALO_CONTROLS,
-  createHexHalo,
-} from "./hexHalo";
 import {
   LIQUID_GLASS_DEFAULTS,
   LIQUID_GLASS_PRESETS,
@@ -22,24 +16,16 @@ import {
 export const HEX_LIQUID: MultiModeContent = {
   slug: "hex-liquid",
   no: "05",
-  title: "LIQUID GLASS / HEX HALO",
+  title: "GRAPHIC LOGO",
   bgKey: "bg",
   modes: [
     {
       value: "liquid-glass",
-      label: "LIQUID GLASS",
+      label: "GRAPHIC LOGO",
       defaults: LIQUID_GLASS_DEFAULTS as unknown as Params,
       presets: LIQUID_GLASS_PRESETS as unknown as Params[],
       controls: LIQUID_GLASS_CONTROLS,
       create: createLiquidGlass,
-    },
-    {
-      value: "hex-halo",
-      label: "HEX HALO",
-      defaults: HEX_HALO_DEFAULTS as unknown as Params,
-      presets: HEX_HALO_PRESETS as unknown as Params[],
-      controls: HEX_HALO_CONTROLS,
-      create: createHexHalo,
     },
     {
       value: "mock-preview",

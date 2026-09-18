@@ -18,7 +18,7 @@ export const GENERATE_CONTENTS: GenerateContentMeta[] = [
   {
     slug: "hex-liquid",
     no: "05",
-    title: "LIQUID GLASS / HEX HALO",
+    title: "GRAPHIC LOGO",
     blurb: "リキッドグラスとドットフィールドをモード切替。ベクターSVG（各ドット）／MP4／PNG。",
   },
 ];

@@ -24,6 +24,8 @@ export type Params = Record<string, ParamValue>;
 export interface CanvasRenderer {
   // 1フレームを ctx に描画（phase 0..1 の純粋関数）
   render(ctx: CanvasRenderingContext2D, W: number, H: number, phase: number, params: Params): void;
+  setPlaying?(playing: boolean): void;
+  seek?(phase: number): void;
   // 対応レンダラは編集可能なベクターSVGを生成（イラレ編集可）。無ければ埋め込みSVG。
   toSvg?(o: { phase: number; loopSeconds: number; params: Params }): string;
   // 導入（出現）アニメの長さ（秒）。renderIntro を持つレンダラのみ設定。

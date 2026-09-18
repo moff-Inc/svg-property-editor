@@ -1,9 +1,4 @@
-import { LayerCache, TAU, clamp } from "./engine";
-import {
-  createLiquidGlass,
-  LIQUID_GLASS_DEFAULTS,
-  LIQUID_GLASS_PRESETS,
-} from "./liquidGlass";
+import { TAU, clamp } from "./engine";
 import type { CanvasRenderer, ControlsSpec, Params } from "./types";
 
 type Theme = "dark" | "system";
@@ -37,7 +32,8 @@ const MOODS: Record<Mood, { label: string; heading: string; score: number; chang
 };
 
 export const MOCK_PREVIEW_DEFAULTS: Params = {
-  mockTheme: "compare", mockMood: "balanced", energy: 78, calm: 92, focus: 86,
+  mockTheme: "compare", mockMood: "balanced", mockScale: 1, mockWidthScale: 1, mockHeightScale: 1,
+  mockOffsetX: 0, mockOffsetY: 0, mockLabelOffsetY: 0, energy: 78, calm: 92, focus: 86,
   variation: 2, bg: "#e9eaee",
 };
 
@@ -48,6 +44,12 @@ export const MOCK_PREVIEW_PRESETS: Params[] = [
 export const MOCK_PREVIEW_CONTROLS: ControlsSpec = [
   ["ムード / MOOD", [
     ["mockMood", "ムード", "o", [["balanced", "バランス"], ["inspired", "インスピレーション"], ["restful", "リラックス"]]],
+    ["mockScale", "モックサイズ", "r", 0.7, 1.1, 0.01, "×"],
+    ["mockWidthScale", "モック横幅", "r", 0.7, 1.1, 0.01, "×"],
+    ["mockHeightScale", "モック縦幅", "r", 0.7, 1.1, 0.01, "×"],
+    ["mockOffsetX", "モック位置 X", "r", -0.2, 0.2, 0.01, ""],
+    ["mockOffsetY", "モック位置 Y", "r", -0.2, 0.2, 0.01, ""],
+    ["mockLabelOffsetY", "下ラベル位置", "r", -40, 40, 1, "px"],
     ["energy", "Energy", "r", 0, 100, 1, "%"],
     ["calm", "Calm", "r", 0, 100, 1, "%"],
     ["focus", "Focus", "r", 0, 100, 1, "%"],
@@ -183,63 +185,67 @@ function navigation(ctx: CanvasRenderingContext2D, p: Palette) {
 }
 
 function drawPhone(
-  ctx: CanvasRenderingContext2D, graphic: HTMLCanvasElement, theme: Theme,
-  phase: number, params: Params,
+  ctx: CanvasRenderingContext2D,
+  theme: Theme,
+  video: HTMLVideoElement | undefined,
+  scaleX: number,
+  scaleY: number,
 ) {
   const p = PALETTES[theme];
-  const moodKey: Mood = params.mockMood === "inspired" || params.mockMood === "restful" ? params.mockMood : "balanced";
-  const mood = MOODS[moodKey];
-  const score = metricValue({ ...params, score: mood.score }, "score", mood.score, phase, 0);
-  const energy = metricValue(params, "energy", 78, phase, 0.8);
-  const calm = metricValue(params, "calm", 92, phase, 1.7);
-  const focus = metricValue(params, "focus", 86, phase, 2.5);
   ctx.save();
-  ctx.shadowColor = "#16182730";
-  ctx.shadowBlur = 32;
-  ctx.shadowOffsetY = 16;
-  rect(ctx, -6, -6, 402, 812, 54, theme === "dark" ? "#33353c" : "#c5c7cf");
   ctx.shadowColor = "transparent";
-  rect(ctx, -3, -3, 396, 806, 51, theme === "dark" ? "#07080c" : "#f8f9fc");
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetY = 0;
+  rect(ctx, 0, -6, 390, 812, 48, theme === "dark" ? "#33353c" : "#c5c7cf");
+  ctx.shadowColor = "transparent";
+  rect(ctx, 0, -3, 390, 806, 48, theme === "dark" ? "#07080c" : "#f8f9fc");
   ctx.beginPath();
   ctx.roundRect(0, 0, 390, 800, 48);
   ctx.clip();
   rect(ctx, 0, 0, 390, 800, 48, p.background);
-  statusBar(ctx, p);
-  label(ctx, "mood", 24, 77, 27, p.ink, 600);
-  label(ctx, "metrix", 95, 77, 27, p.ink, 400);
-  dot(ctx, 352, 69, 16, p.tint);
-  // Small four-point sparkle, repeated as a quiet brand detail.
-  line(ctx, [[352, 60], [352, 78]], p.accent, 1.4);
-  line(ctx, [[343, 69], [361, 69]], p.accent, 1.4);
-  label(ctx, "YOUR DAILY LANDSCAPE", 24, 113, 10, p.muted, 600);
-  label(ctx, "A moment for you", 366, 113, 10, p.muted, 400, "right");
-  label(ctx, mood.heading, 24, 149, 27, p.ink, 400, "left", true);
-  // Reuse the real LIQUID GLASS preset 02 renderer; the score occupies its hollow center.
-  ctx.drawImage(graphic, 10, 153, 370, 370);
-  label(ctx, "MOOD SCORE", 195, 307, 9, p.muted, 600, "center");
-  label(ctx, String(score), 195, 365, 60, p.ink, 400, "center");
-  label(ctx, "out of 100", 195, 385, 10, p.muted, 400, "center");
-  rect(ctx, 121, 462, 148, 29, 15, p.tint);
-  dot(ctx, 137, 476, 3, p.accent);
-  label(ctx, mood.label, 200, 480, 12, p.accent, 500, "center");
-  label(ctx, "Your rhythm", 24, 515, 17, p.ink, 600);
-  label(ctx, `+${mood.change} pts from yesterday`, 366, 514, 10, p.muted, 400, "right");
-  metricCard(ctx, 24, 530, "energy", energy, phase, p, theme === "dark");
-  metricCard(ctx, 199, 530, "calm", calm, phase, p, theme === "dark");
-  label(ctx, "Focus", 24, 714, 12, p.ink, 500);
-  for (let i = 0; i < 35; i++) {
-    const height = 5 + 11 * (0.5 + 0.5 * Math.sin(i * 0.22 + phase * TAU));
-    rect(ctx, 94 + i * 6, 708 - height / 2, 3, height, 2, i / 35 < focus / 100 ? p.accent : p.line);
+  if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+    ctx.restore();
+    return;
   }
-  label(ctx, `${focus}%`, 366, 714, 15, p.ink, 500, "right");
-  navigation(ctx, p);
+  const sourceW = video.videoWidth || 496;
+  const sourceH = video.videoHeight || 1080;
+  // Preserve the supplied portrait ratio and place it on the theme background.
+  // The video is intentionally fixed to the reference phone size. Mock
+  // scale/width/height controls affect only the surrounding layout.
+  const VIDEO_SCALE = 0.72;
+  const fit = (800 * VIDEO_SCALE / sourceH) * 0.94;
+  const drawW = sourceW * fit / scaleX;
+  const drawH = sourceH * fit / scaleY;
+  ctx.drawImage(video, (390 - drawW) / 2, (800 - drawH) / 2, drawW, drawH);
   ctx.restore();
 }
 
 export function createMockPreview(): CanvasRenderer {
-  const cache = new LayerCache();
-  const liquid = { dark: createLiquidGlass(), system: createLiquidGlass() };
+  const videos: Partial<Record<Theme, HTMLVideoElement>> = {};
+  if (typeof document !== "undefined") {
+    for (const theme of ["dark", "system"] as const) {
+      const video = document.createElement("video");
+      video.src = `/mock-preview/${theme === "dark" ? "black" : "white"}-iphone.mp4`;
+      video.loop = true;
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = "auto";
+      videos[theme] = video;
+    }
+  }
   return {
+    setPlaying(playing) {
+      for (const video of Object.values(videos)) {
+        if (!video) continue;
+        if (playing) void video.play().catch(() => undefined);
+        else video.pause();
+      }
+    },
+    seek(phase) {
+      for (const video of Object.values(videos)) {
+        if (video && video.readyState >= HTMLMediaElement.HAVE_METADATA) video.currentTime = phase * 20;
+      }
+    },
     render(ctx, W, H, phase, params) {
       const selected = params.mockTheme;
       const themes: Theme[] = selected === "dark" || selected === "system" ? [selected] : ["dark", "system"];
@@ -261,22 +267,24 @@ export function createMockPreview(): CanvasRenderer {
       label(ctx, "MOBILE EXPERIENCE  /  01", 1244, 36, 10, "#717684", 400, "right");
       for (let i = 0; i < themes.length; i++) {
         const theme = themes[i];
-        // Render at the actual output density (capped at 2x) in an independent layer.
-        const size = Math.round(370 * Math.min(2, W / 1280));
-        const layer = cache.get(`mock-${theme}`, size, size);
-        liquid[theme].render(layer.x, size, size, phase, {
-          ...LIQUID_GLASS_DEFAULTS,
-          ...LIQUID_GLASS_PRESETS[1],
-          bg: PALETTES[theme].background,
-          wordmark: 0, transparent: 1, motion: 2,
-        });
-        const x = themes.length === 1 ? 484 : i === 0 ? 262 : 706;
+        const mockScale = clamp(Number(params.mockScale ?? 1), 0.7, 1.1);
+        const mockWidthScale = clamp(Number(params.mockWidthScale ?? 1), 0.7, 1.1);
+        const mockHeightScale = clamp(Number(params.mockHeightScale ?? 1), 0.7, 1.1);
+        const mockOffsetX = clamp(Number(params.mockOffsetX ?? 0), -0.2, 0.2);
+        const mockOffsetY = clamp(Number(params.mockOffsetY ?? 0), -0.2, 0.2);
+        const mockLabelOffsetY = clamp(Number(params.mockLabelOffsetY ?? 0), -40, 40);
+        const phoneScaleX = 0.72 * mockScale * mockWidthScale;
+        const phoneScaleY = 0.72 * mockScale * mockHeightScale;
+        const centerX = (themes.length === 1 ? 640 : i === 0 ? 420 : 860) + 1280 * mockOffsetX;
+        const x = centerX - 201 * phoneScaleX;
         ctx.save();
-        ctx.translate(x, 48);
-        ctx.scale(0.8, 0.8);
-        drawPhone(ctx, layer.c, theme, phase, params);
+        const phoneY = 56 + 720 * mockOffsetY;
+        ctx.translate(x, phoneY);
+        ctx.scale(phoneScaleX, phoneScaleY);
+        drawPhone(ctx, theme, videos[theme], phoneScaleX, phoneScaleY);
         ctx.restore();
-        label(ctx, theme === "dark" ? "01  /  DARK" : "02  /  SYSTEM · WHITE", x + 156, 712, 10, "#5d6270", 500, "center");
+        const labelY = phoneY + 812 * phoneScaleY + 20 + mockLabelOffsetY;
+        label(ctx, theme === "dark" ? "01  /  DARK" : "02  /  SYSTEM · WHITE", x + 195 * phoneScaleX, labelY, 10, "#5d6270", 500, "center");
       }
       label(ctx, "DESIGN PREVIEW", 36, 689, 9, "#717684", 500);
       label(ctx, "Illustrative mood data", 1244, 689, 9, "#717684", 400, "right");

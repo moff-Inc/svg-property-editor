@@ -18,18 +18,31 @@ export default async function GenerateContentPage({
 
   // 保存済み設定の読み込み（?id=）。slug 不一致は無視。
   let initial: GenInitial | undefined;
+  const supabase = await createClient();
   if (id) {
-    const supabase = await createClient();
     const { data } = await supabase
       .from("generators")
       .select("id,name,params,slug")
       .eq("id", id)
       .single();
     if (data && data.slug === meta.slug) {
+      initial = { id: data.id, name: data.name, params: data.params as unknown as Params };
+    }
+  } else if (meta.slug === "hex-liquid") {
+    const { data } = await supabase
+      .from("generators")
+      .select("id,name,params,slug")
+      .eq("slug", meta.slug)
+      .order("updated_at", { ascending: false })
+      .limit(20);
+    const latestGraphicLogo = (data ?? []).find(
+      (row) => (row.params as Record<string, unknown> | null)?.mode === "liquid-glass",
+    );
+    if (latestGraphicLogo) {
       initial = {
-        id: data.id,
-        name: data.name,
-        params: data.params as unknown as Params,
+        id: latestGraphicLogo.id,
+        name: latestGraphicLogo.name,
+        params: latestGraphicLogo.params as unknown as Params,
       };
     }
   }
