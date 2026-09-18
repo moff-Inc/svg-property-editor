@@ -424,3 +424,11 @@
 @media (prefers-reduced-motion: reduce) {
   .gen *, .gen *::before, .gen *::after { transition-duration: 0.01ms !important; }
 }
+
+/* 出力形式の補足（MOV=背景透過の注意書き） */
+.gen-format-note {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.8;
+  color: var(--muted);
+}

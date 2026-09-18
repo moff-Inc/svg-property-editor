@@ -1,11 +1,13 @@
 import DOMPurify from "dompurify";
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
 import { pickCodec, encodeDimensions } from "@/lib/media/h264";
+import { MovPngWriter, addCanvasFrameToMov } from "@/lib/media/movMuxer";
+import { isPngEncoderSupported } from "@/lib/media/png";
 import { applyEdits } from "./apply";
 import { ANIMATION_KEYFRAMES } from "./animations";
 import type { EditsMap } from "./types";
 
-// SVGアニメーションをブラウザ内で H.264/MP4 に書き出す。
+// SVGアニメーションをブラウザ内で動画に書き出す（H.264/MP4 または 背景透過のMOV）。
 // 方式: ライブと同一のSVGをオフスクリーンに構築 → 各フレームで CSS アニメを
 // currentTime でシーク → spin は解析的に回転を、pulse/blink は getComputedStyle の
 // opacity を各フレームのクローンへ焼き込み → data URL 経由でラスタライズ →
@@ -16,7 +18,11 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const KF_ID = "svged-export-kf";
 const DEFAULT_DURATION_SEC = 2; // アニメ未指定時のクリップ長 / applyAnimation の既定と一致
 
-export type Mp4Progress = (done: number, total: number) => void;
+// bytes は MOV のように書き出し途中でサイズが読める形式でのみ渡す。
+export type VideoProgress = (done: number, total: number, bytes?: number) => void;
+
+// "mov" は背景透過（QuickTime PNG / ロスレス）。H.264 はアルファを保持できない。
+export type SvgVideoFormat = "mp4" | "mov";
 
 interface Box {
   x: number;
@@ -115,16 +121,24 @@ function loadImage(url: string): Promise<HTMLImageElement> {
   });
 }
 
-export async function exportMp4(opts: {
+export async function exportSvgVideo(opts: {
   baseSvg: string;
   edits: EditsMap;
   name: string;
   fps?: number;
-  onProgress?: Mp4Progress;
+  onProgress?: VideoProgress;
+  format?: SvgVideoFormat;
 }): Promise<void> {
   const { baseSvg, edits, name, fps = 30, onProgress } = opts;
+  const format = opts.format ?? "mp4";
 
-  if (typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined") {
+  if (format === "mov") {
+    if (!isPngEncoderSupported()) {
+      throw new Error(
+        "このブラウザは透過MOVの書き出しに未対応です（CompressionStream が利用できません）。",
+      );
+    }
+  } else if (typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined") {
     throw new Error(
       "このブラウザは WebCodecs (VideoEncoder) に未対応です。Chrome / Edge / Safari 16.4+ でお試しください。",
     );
@@ -225,38 +239,47 @@ export async function exportMp4(opts: {
     // 出力解像度は元の viewBox 比から決定（アスペクト比を維持しているため不変）
     const { sw, sh } = encodeDimensions(w, h);
 
-    const codec = await pickCodec(sw, sh, fps);
-    if (!codec) {
-      throw new Error("対応する H.264 エンコーダが見つかりませんでした");
-    }
-
-    const muxer = new Muxer({
-      target: new ArrayBufferTarget(),
-      video: { codec: "avc", width: sw, height: sh, frameRate: fps },
-      fastStart: "in-memory",
-    });
-
+    // MOV は PNG をそのまま格納するのでエンコーダを持たない
+    let muxer: Muxer<ArrayBufferTarget> | null = null;
+    let encoder: VideoEncoder | null = null;
     let encodeError: unknown = null;
-    const encoder = new VideoEncoder({
-      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-      error: (e) => {
-        encodeError = e;
-      },
-    });
-    const config = {
-      codec,
-      width: sw,
-      height: sh,
-      framerate: fps,
-      bitrate: Math.min(20_000_000, Math.max(1_000_000, Math.round(sw * sh * fps * 0.12))),
-      avc: { format: "avc" },
-    } as VideoEncoderConfig;
-    encoder.configure(config);
+    const movWriter = format === "mov" ? new MovPngWriter({ width: sw, height: sh, fps }) : null;
+
+    if (format === "mp4") {
+      const codec = await pickCodec(sw, sh, fps);
+      if (!codec) {
+        throw new Error("対応する H.264 エンコーダが見つかりませんでした");
+      }
+
+      muxer = new Muxer({
+        target: new ArrayBufferTarget(),
+        video: { codec: "avc", width: sw, height: sh, frameRate: fps },
+        fastStart: "in-memory",
+      });
+
+      const mx = muxer;
+      encoder = new VideoEncoder({
+        output: (chunk, meta) => mx.addVideoChunk(chunk, meta),
+        error: (e) => {
+          encodeError = e;
+        },
+      });
+      const config = {
+        codec,
+        width: sw,
+        height: sh,
+        framerate: fps,
+        bitrate: Math.min(20_000_000, Math.max(1_000_000, Math.round(sw * sh * fps * 0.12))),
+        avc: { format: "avc" },
+      } as VideoEncoderConfig;
+      encoder.configure(config);
+    }
 
     const canvas = document.createElement("canvas");
     canvas.width = sw;
     canvas.height = sh;
-    const ctx = canvas.getContext("2d");
+    // MOV は毎フレーム getImageData で読み戻す
+    const ctx = canvas.getContext("2d", format === "mov" ? { willReadFrequently: true } : undefined);
     if (!ctx) throw new Error("Canvas 2D コンテキストを取得できませんでした");
 
     const frameDurUs = Math.round(1_000_000 / fps);
@@ -310,34 +333,47 @@ export async function exportMp4(opts: {
       const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgStr)}`;
       const img = await loadImage(url);
 
-      // MP4 はアルファ非対応 → 白背景で合成
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, sw, sh);
+      ctx.clearRect(0, 0, sw, sh);
+      if (format === "mp4") {
+        // MP4(H.264) はアルファ非対応 → 白背景で合成。透過が要るなら MOV を使う。
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, sw, sh);
+      }
       ctx.drawImage(img, 0, 0, sw, sh);
 
-      const frame = new VideoFrame(canvas, {
-        timestamp: i * frameDurUs,
-        duration: frameDurUs,
-      });
-      encoder.encode(frame, { keyFrame: i % fps === 0 });
-      frame.close();
-
-      if (encodeError) throw encodeError;
-      onProgress?.(i + 1, frameCount);
+      if (movWriter) {
+        await addCanvasFrameToMov(movWriter, ctx, sw, sh);
+        onProgress?.(i + 1, frameCount, movWriter.byteLength);
+      } else if (encoder) {
+        const frame = new VideoFrame(canvas, {
+          timestamp: i * frameDurUs,
+          duration: frameDurUs,
+        });
+        encoder.encode(frame, { keyFrame: i % fps === 0 });
+        frame.close();
+        if (encodeError) throw encodeError;
+        onProgress?.(i + 1, frameCount);
+      }
       if (i % 5 === 0) await new Promise((r) => setTimeout(r, 0)); // UIを止めない
     }
 
-    await encoder.flush();
-    encoder.close();
-    if (encodeError) throw encodeError;
-    muxer.finalize();
-
-    const buffer = (muxer.target as ArrayBufferTarget).buffer;
-    const blob = new Blob([buffer], { type: "video/mp4" });
+    let blob: Blob;
+    let ext: string;
+    if (movWriter) {
+      blob = movWriter.finalize();
+      ext = "mov";
+    } else {
+      await encoder!.flush();
+      encoder!.close();
+      if (encodeError) throw encodeError;
+      muxer!.finalize();
+      blob = new Blob([(muxer!.target as ArrayBufferTarget).buffer], { type: "video/mp4" });
+      ext = "mp4";
+    }
     const dlUrl = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = dlUrl;
-    a.download = name.endsWith(".mp4") ? name : `${name}.mp4`;
+    a.download = name.endsWith(`.${ext}`) ? name : `${name}.${ext}`;
     a.click();
     URL.revokeObjectURL(dlUrl);
   } finally {

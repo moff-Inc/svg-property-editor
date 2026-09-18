@@ -1,9 +1,14 @@
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
 import { pickCodec, encodeDimensions } from "@/lib/media/h264";
+import { MovPngWriter, addCanvasFrameToMov } from "@/lib/media/movMuxer";
+import { isPngEncoderSupported } from "@/lib/media/png";
 
 // canvas コンテンツ(05/07)の書き出し。WebCodecs+mp4-muxer で決定論的に H.264/MP4 化
 // （phase を固定ステップで進め frameCount 枚を正確にエンコード）。WebCodecs 非対応時は
 // MediaRecorder にフォールバック（実時間キャプチャ・WebMになる場合あり）。
+//
+// 背景透過が必要なときは "mov"（QuickTime PNG）を選ぶ。H.264 も VP9(WebCodecs) も
+// アルファを保持できないため、MP4 では透過を出力できない。
 
 export type FramePainter = (
   ctx: CanvasRenderingContext2D,
@@ -19,7 +24,11 @@ export type IntroPainter = (
   t01: number,
   phase: number,
 ) => void;
-export type Progress = (done: number, total: number) => void;
+// done/total はフレーム数。bytes は MOV のようにサイズが読めない形式で、
+// 途中経過のファイルサイズを UI に出すために渡す。
+export type Progress = (done: number, total: number, bytes?: number) => void;
+
+export type VideoFormat = "mp4" | "mov";
 
 function downloadBlob(blob: Blob, name: string, ext: string) {
   const url = URL.createObjectURL(blob);
@@ -30,7 +39,7 @@ function downloadBlob(blob: Blob, name: string, ext: string) {
   URL.revokeObjectURL(url);
 }
 
-export async function exportCanvasMp4(opts: {
+export async function exportCanvasVideo(opts: {
   paint: FramePainter;
   width: number;
   height: number;
@@ -42,15 +51,24 @@ export async function exportCanvasMp4(opts: {
   // 動画の先頭に一度だけ再生する導入（出現）アニメ。省略時は従来どおりループのみ。
   introSeconds?: number;
   paintIntro?: IntroPainter;
+  // "mov" は背景透過（QuickTime PNG / ロスレス）。既定は従来どおり "mp4"。
+  format?: VideoFormat;
 }): Promise<void> {
   const { paint, width, height, fps, loopSeconds, bitrateMbps, name, onProgress } = opts;
+  const format = opts.format ?? "mp4";
   const introSeconds = opts.paintIntro && opts.introSeconds ? opts.introSeconds : 0;
   const paintIntro = opts.paintIntro;
-  const { sw, sh } = encodeDimensions(width, height);
+  // MP4 は H.264 の制約（Level 4.0 / 偶数寸法）に合わせて丸めるが、MOV(PNG) は
+  // コーデック側の制約がないので指定サイズをそのまま使う。
+  const { sw, sh } =
+    format === "mov"
+      ? { sw: Math.max(1, Math.round(width)), sh: Math.max(1, Math.round(height)) }
+      : encodeDimensions(width, height);
   const canvas = document.createElement("canvas");
   canvas.width = sw;
   canvas.height = sh;
-  const ctx = canvas.getContext("2d");
+  // MOV は毎フレーム getImageData で読み戻すので willReadFrequently を立てる
+  const ctx = canvas.getContext("2d", format === "mov" ? { willReadFrequently: true } : undefined);
   if (!ctx) throw new Error("Canvas 2D コンテキストを取得できませんでした");
 
   const introFrames = Math.round(introSeconds * fps);
@@ -71,6 +89,27 @@ export async function exportCanvasMp4(opts: {
     }
   };
   const bitrate = Math.min(40_000_000, Math.max(1_000_000, Math.round(bitrateMbps * 1_000_000)));
+
+  // --- MOV: 背景透過（QuickTime PNG / 全フレームがロスレスのキーフレーム） ---
+  if (format === "mov") {
+    if (!isPngEncoderSupported()) {
+      throw new Error(
+        "この環境は透過MOVの書き出しに未対応です（CompressionStream が利用できません）。",
+      );
+    }
+    const writer = new MovPngWriter({ width: sw, height: sh, fps });
+    for (let i = 0; i < frameCount; i++) {
+      // 透過を残すため、毎フレーム完全にクリアしてから描く（レンダラ側が
+      // 背景を塗らない設定＝transparent のときだけ透過が残る）。
+      ctx.clearRect(0, 0, sw, sh);
+      paintFrame(i);
+      await addCanvasFrameToMov(writer, ctx, sw, sh);
+      onProgress?.(i + 1, frameCount, writer.byteLength);
+      if (i % 4 === 3) await new Promise((r) => setTimeout(r, 0)); // UIを止めない
+    }
+    downloadBlob(writer.finalize(), name, "mov");
+    return;
+  }
 
   // --- WebCodecs（決定論的・推奨） ---
   if (typeof VideoEncoder !== "undefined" && typeof VideoFrame !== "undefined") {

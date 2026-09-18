@@ -6,9 +6,10 @@ import { MULTI_CONTENTS } from "@/lib/identity/registry";
 import type { CanvasRenderer, Params } from "@/lib/identity/types";
 import ControlsPanel from "./ControlsPanel";
 import {
-  exportCanvasMp4,
+  exportCanvasVideo,
   exportCanvasPng,
   exportCanvasSvg,
+  type VideoFormat,
 } from "@/lib/identity/exportCanvasVideo";
 import { saveGenerator } from "@/lib/identity/persist";
 import { downloadSvg } from "@/lib/svg/serialize";
@@ -22,6 +23,16 @@ export interface GenInitial {
 
 const EXPORT_W = 1280;
 const EXPORT_H = 720;
+
+const FORMATS: { value: VideoFormat; label: string; ext: string }[] = [
+  { value: "mp4", label: "MP4 / H.264", ext: "mp4" },
+  { value: "mov", label: "MOV / 背景透過", ext: "mov" },
+];
+
+const mib = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+
+// MOV(ロスレス)のサイズ目安。1280x720 の LIQUID GLASS 実測が 1フレーム 0.2〜0.4MB。
+const MOV_MB_PER_FRAME = 0.3;
 
 // スライダー進捗（--fill）。
 function fill(num: number, min: number, max: number): CSSProperties {
@@ -92,7 +103,9 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
   const [loopSeconds, setLoopSeconds] = useState(12);
   const [fps, setFps] = useState(60);
   const [bitrateMbps, setBitrateMbps] = useState(40);
-  const [mp4Pct, setMp4Pct] = useState<number | null>(null);
+  const [format, setFormat] = useState<VideoFormat>("mp4");
+  const [exportPct, setExportPct] = useState<number | null>(null);
+  const [exportBytes, setExportBytes] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -241,38 +254,47 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
     }
   }
 
-  async function handleMp4() {
-    if (mp4Pct !== null) return;
-    setMp4Pct(0);
+  async function handleVideo() {
+    if (exportPct !== null) return;
+    setExportPct(0);
+    setExportBytes(0);
     setError(null);
     exportingRef.current = true;
     try {
       const r = active.create();
-      const introSecs = getIntroSeconds(r, paramsRef.current);
+      // MOV は背景透過が目的なので、書き出しの間だけ transparent を立てた
+      // スナップショットで描く（画面のプレビュー設定は変えない）。
+      const exportParams: Params =
+        format === "mov" ? { ...paramsRef.current, transparent: 1 } : { ...paramsRef.current };
+      const introSecs = getIntroSeconds(r, exportParams);
       // 導入アニメ ON（intro=1 かつ対応レンダラ）のときは動画先頭に一度含める。
       const introOn =
-        Boolean((paramsRef.current as Record<string, unknown>).intro) &&
-        !!r.renderIntro &&
-        introSecs > 0;
-      await exportCanvasMp4({
-        paint: (ctx, W, H, phase) => r.render(ctx, W, H, phase, paramsRef.current),
+        Boolean((exportParams as Record<string, unknown>).intro) && !!r.renderIntro && introSecs > 0;
+      await exportCanvasVideo({
+        format,
+        paint: (ctx, W, H, phase) => r.render(ctx, W, H, phase, exportParams),
         width: EXPORT_W,
         height: EXPORT_H,
         fps,
         loopSeconds,
         bitrateMbps,
         name: `identity_${content.no}_${mode}`,
-        onProgress: (d, t) => setMp4Pct(Math.round((d / t) * 100)),
+        onProgress: (d, t, bytes) => {
+          setExportPct(Math.round((d / t) * 100));
+          if (bytes !== undefined) setExportBytes(bytes);
+        },
         introSeconds: introOn ? introSecs : undefined,
         paintIntro:
           introOn && r.renderIntro
-            ? (ctx, W, H, t01, phase) => r.renderIntro!(ctx, W, H, t01, phase, paramsRef.current)
+            ? (ctx, W, H, t01, phase) => r.renderIntro!(ctx, W, H, t01, phase, exportParams)
             : undefined,
       });
     } catch (e) {
-      setError(e instanceof Error ? e.message : "MP4の書き出しに失敗しました");
+      setError(
+        e instanceof Error ? e.message : `${format.toUpperCase()}の書き出しに失敗しました`,
+      );
     } finally {
-      setMp4Pct(null);
+      setExportPct(null);
       exportingRef.current = false;
     }
   }
@@ -373,8 +395,12 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
           <button className="gen-tbtn" onClick={handlePng}>
             PNG
           </button>
-          <button className="gen-export" onClick={handleMp4} disabled={mp4Pct !== null}>
-            <span>{mp4Pct !== null ? `書き出し中 ${mp4Pct}%` : "MP4を書き出し"}</span>
+          <button className="gen-export" onClick={handleVideo} disabled={exportPct !== null}>
+            <span>
+              {exportPct !== null
+                ? `書き出し中 ${exportPct}%${exportBytes ? ` · ${mib(exportBytes)}` : ""}`
+                : `${format.toUpperCase()}を書き出し`}
+            </span>
             <svg viewBox="0 0 24 24" aria-hidden>
               <path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14" />
             </svg>
@@ -519,6 +545,18 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
             <div className="gen-section-title">
               <h2>出力 / OUTPUT</h2>
             </div>
+            <div className="gen-mode-switch" role="group" aria-label="動画の書き出し形式">
+              {FORMATS.map((f) => (
+                <button
+                  key={f.value}
+                  className={f.value === format ? "is-active" : ""}
+                  onClick={() => setFormat(f.value)}
+                  aria-pressed={f.value === format}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
             <div className="gen-row">
               <span>ループ長</span>
               <output>{loopSeconds}s</output>
@@ -544,19 +582,29 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
                 <option value={60}>60</option>
               </select>
             </div>
-            <div className="gen-row">
-              <span>ビットレート</span>
-              <output>{bitrateMbps} Mbps</output>
-              <input
-                type="range"
-                min={4}
-                max={40}
-                step={1}
-                value={bitrateMbps}
-                style={fill(bitrateMbps, 4, 40)}
-                onChange={(e) => setBitrateMbps(Number(e.target.value))}
-              />
-            </div>
+            {format === "mp4" ? (
+              <div className="gen-row">
+                <span>ビットレート</span>
+                <output>{bitrateMbps} Mbps</output>
+                <input
+                  type="range"
+                  min={4}
+                  max={40}
+                  step={1}
+                  value={bitrateMbps}
+                  style={fill(bitrateMbps, 4, 40)}
+                  onChange={(e) => setBitrateMbps(Number(e.target.value))}
+                />
+              </div>
+            ) : (
+              <p className="gen-format-note">
+                MOVは背景を透過させ、QuickTime PNG（ロスレス）で {loopSeconds * fps} フレームを
+                書き出します（目安 約{Math.round((loopSeconds * fps * MOV_MB_PER_FRAME) / 5) * 5}MB・
+                書き出しに約{Math.max(1, Math.round((loopSeconds * fps * 0.07) / 5) * 5)}秒）。
+                After Effects / Premiere Pro / Final Cut / DaVinci でアルファ付きのまま
+                読み込めます。重い場合はループ長と FPS を下げてください。
+              </p>
+            )}
           </div>
 
           <ControlsPanel spec={active.controls} params={params} defaults={active.defaults} onChange={applyPatch} />
