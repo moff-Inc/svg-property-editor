@@ -100,6 +100,11 @@ export interface LiquidGlassParams {
   wmSize: number; // ワードマークのサイズ（既定比の倍率）
   wmX: number; // ワードマーク中心X（キャンバス幅比 0..1）
   wmY: number; // ワードマーク中心Y（キャンバス高比 0..1）
+  // グラフィック（ドット群）の位置。自動配置（ロゴON=左寄せ / OFF=中央）からの
+  // ずらし量をキャンバス比で持つ。0 が従来どおりで、ワードマークの ON/OFF どちらの
+  // 自動配置も壊さずに動かせる。比なのでプレビュー/書き出し/SVG で同じ位置になる。
+  gfxX?: number; // 横方向のずらし（キャンバス幅比。+で右）
+  gfxY?: number; // 縦方向のずらし（キャンバス高比。+で下）
   intro?: number; // 導入（出現）アニメ: 0=なし, 1=渦の集結→出現→ロゴ
   introPattern?: number; // 導入パターン: 1=文字順フェード, 2=粒子流動＋文字形成
   introWordSeconds: number; // 導入D: 文字出現アニメーションの長さ（秒）
@@ -793,6 +798,8 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   wmSize: 0.88,
   wmX: 0.65,
   wmY: 0.515,
+  gfxX: 0,
+  gfxY: 0,
   intro: 0,
   introPattern: 1,
   introWordSeconds: 4.8,
@@ -829,7 +836,17 @@ export const LIQUID_GLASS_PRESETS: Partial<LiquidGlassParams>[] = [
 // controls: HEX HALO と共通の並び（表示→中央の六角形→フォルム→色→モーション→背景）に
 // 揃え、モード切替時も同機能セクションが同じ位置に来るようにする。
 export const LIQUID_GLASS_CONTROLS: ControlsSpec = [
-  ["表示 / VIEW", [["zoom", "ズーム", "r", 0.3, 2.6, 0.01, "×"]]],
+  [
+    "表示 / VIEW",
+    [
+      ["zoom", "ズーム", "r", 0.3, 2.6, 0.01, "×"],
+      // 自動配置からのずらし（0=従来どおり）。ロゴ位置(wmX/wmY)とは独立に動かせる。
+      // 可動域は ±0.35（1280×720 なら横±448px / 縦±252px）。これ以上広げると
+      // グラフィック(D=H=720)が端で画面外へ抜けてしまうため、あえて絞っている。
+      ["gfxX", "グラフィック位置 X（左右）", "r", -0.35, 0.35, 0.005, ""],
+      ["gfxY", "グラフィック位置 Y（上下）", "r", -0.35, 0.35, 0.005, ""],
+    ],
+  ],
   [
     "ロゴ / LOGO",
     [
@@ -1100,13 +1117,20 @@ const inkFor = (bg: string) => {
   return c[0] * 0.299 + c[1] * 0.587 + c[2] * 0.114 > 150 ? "#000000" : "#ffffff";
 };
 
-// ロックアップの配置（render / toSvg で共有）。グラフィックは常に D×D 正方形へ描画し
-// （マークの大きさ＝横幅は wordmark の ON/OFF で不変）、ON時は左に固定・OFF時は中央。
+// ロックアップの配置（render / renderIntro / toSvg で共有）。グラフィックは常に D×D
+// 正方形へ描画し（マークの大きさ＝横幅は wordmark の ON/OFF で不変）、ON時は左に固定・
+// OFF時は中央。そこへ gfxX/gfxY のずらしを足す。
 // ワードマークは サイズ(wmSize=既定比の倍率) と 中心位置(wmX,wmY=キャンバス比) で調整可能。
+//
+// グラフィックの位置を決めるのはここ1箇所だけなので、canvas / SVG / 動画のすべてが
+// 同じ場所に出る。導入アニメは「中央レイアウト Lc と通常レイアウト L の差」で移動量を
+// 決めているが、ずらしは両方に同じだけ乗るため差は変わらず、動きは崩れない。
 function lockupLayout(W: number, H: number, showWord: boolean, P: LiquidGlassParams) {
   const D = H; // グラフィック正方形の一辺（mark は min(D,D) 基準＝ON/OFFで同一サイズ）
-  const gy = Math.round((H - D) / 2);
-  const gcx = showWord ? W * 0.2 : W / 2; // グラフィック中心X: ON=左寄せ / OFF=中央
+  const ox = W * (P.gfxX ?? 0);
+  const oy = H * (P.gfxY ?? 0);
+  const gy = Math.round((H - D) / 2 + oy);
+  const gcx = (showWord ? W * 0.2 : W / 2) + ox; // グラフィック中心X: ON=左寄せ / OFF=中央
   const gx = Math.round(gcx - D / 2);
   if (!showWord) return { D, gx, gy, wx: 0, wy: 0, wmScale: 0 };
   const wmScale = ((H * 0.4) / LOGO_H) * (P.wmSize ?? 1);
