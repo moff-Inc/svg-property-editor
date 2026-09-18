@@ -9,7 +9,7 @@ const result = await build({
   stdin: { contents: source + '\nexport { accentAlphaCycles, accentOpacityPair, accentRipple, applyDotAppearance, dotField, flowDotField, gradWindow, gradientRgb, innerRgb, introGraphicParams, introParticleParams, introSlidePosition, introSlideProgress, introTrailSamples, introTiming, motionDirection, ripplePhase, wordmarkLetterScales, wordmarkRevealTiming };', resolveDir: sourceDir, loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'esm',
 });
-const { accentAlphaCycles, accentOpacityPair, accentRipple, applyDotAppearance, dotField, flowDotField, gradWindow, gradientRgb, innerRgb, introGraphicParams, introParticleParams, introSlidePosition, introSlideProgress, introTrailSamples, introTiming, motionDirection, ripplePhase, wordmarkLetterScales, wordmarkRevealTiming, createLiquidGlass, LIQUID_GLASS_DEFAULTS } = await import(
+const { accentAlphaCycles, accentOpacityPair, accentRipple, applyDotAppearance, dotField, flowDotField, gradWindow, gradientRgb, innerRgb, introGraphicParams, introParticleParams, introSlidePosition, introSlideProgress, introTrailSamples, introTiming, motionDirection, ripplePhase, wordmarkLetterScales, wordmarkRevealTiming, createLiquidGlass, LIQUID_GLASS_DEFAULTS, LIQUID_GLASS_PRESETS } = await import(
   `data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 
 const params = { ...LIQUID_GLASS_DEFAULTS, wordmark: 0 }; // gradient source by default
@@ -23,15 +23,29 @@ const latestSavedDefaults = {
   dotAspect: 1, fieldRot: 0, dotAlpha: 1, accentAlpha: 1,
   accentInnerAlpha: 0.41, accentOuterAlpha: 0.4, accentAlphaMotion: 1,
   accentAlphaCycles: 6, dotBlur: 0, dotGlow: 0.25, dotGlowSize: 11,
-  gradStart: 0.15, gradLumaEven: 0, innerBright: 1.51, animA: 2,
-  rippleCycles: 2, wmSize: 0.75, wmX: 0.66, wmY: 0.51, gfxX: 0.045,
-  intro: 1, introWordSeconds: 4, introDimStartSeconds: 1.5, introDimSpeed: 1,
+  gradStart: 0.15, gradLumaEven: 0, innerBright: 1.51, animA: 1,
+  rippleCycles: 2, wmSize: 0.75, wmX: 0.625, wmY: 0.51, gfxX: 0.045,
+  intro: 0, introWordSeconds: 4, introDimStartSeconds: 1.5, introDimSpeed: 1,
   introLetterScale: 1.1, introAccentSeconds: 4, introAccentStartOffset: -3.8,
   introOutlineMode: 1, introOutlineColor: '',
-  transparent: 1,
+  transparent: 0,
 };
 for (const [key, value] of Object.entries(latestSavedDefaults)) {
   assert.equal(LIQUID_GLASS_DEFAULTS[key], value, `latest SAVE default mismatch: ${key}`);
+}
+assert.deepEqual(LIQUID_GLASS_PRESETS[0], LIQUID_GLASS_DEFAULTS, 'MAIN preset must mirror latest SAVE defaults');
+assert.deepEqual(
+  { dotColor: LIQUID_GLASS_PRESETS.at(-1)?.dotColor, dotColor2: LIQUID_GLASS_PRESETS.at(-1)?.dotColor2 },
+  { dotColor: '#b000b9', dotColor2: '#b54d08' },
+  'last 15colors.pdf preset (Vision) must match outside/inside colors',
+);
+{
+  const sample = [92, 72, 236];
+  const base = { ...params, innerBright: 1, outerBright: 1 };
+  const black = applyDotAppearance(sample, 0.5, { ...base, bg: '#000000' });
+  const white = applyDotAppearance(sample, 0.5, { ...base, bg: '#ffffff' });
+  assert.deepEqual(black, sample, 'black background must preserve the saved color');
+  assert.notDeepEqual(white, black, 'white background must apply the reference color treatment');
 }
 
 // Accent opacity motion: OFF preserves the configured endpoints; ON smoothly swaps them and

@@ -102,7 +102,7 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
   const [playing, setPlaying] = useState(
     () => typeof window === "undefined" || !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
   );
-  const [loopSeconds, setLoopSeconds] = useState(12);
+  const [loopSeconds, setLoopSeconds] = useState(20);
   const [fps, setFps] = useState(60);
   const [bitrateMbps, setBitrateMbps] = useState(40);
   const [format, setFormat] = useState<VideoFormat>("mp4");

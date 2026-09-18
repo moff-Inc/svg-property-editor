@@ -193,6 +193,25 @@ const GRAD_LUMA_EVEN = 0.85; // 0=無補償 … 1=内外を等輝度化（inner/
 const luma601 = (c: number[]) => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
 // 背景明度ゲート: 黒(0)で前段式にバイト一致・白(1)で白背景向け補償をフル適用（両背景で成立）。
 const bgWhiteness = (P: LiquidGlassParams) => clamp((luma601(rgbOf(P.bg)) / 255 - 0.5) / 0.5, 0, 1);
+const BACKGROUND_COLOR_ADJUSTMENTS = {
+  black: { saturation: 1, lighten: 0, multiplyA: [1, 1, 1], multiplyB: [1, 1, 1], innerSpread: 0, hueShift: 0, innerGreen: 1 },
+  white: { saturation: 0.96, lighten: 0.08, multiplyA: [0.99, 1, 1.01], multiplyB: [1, 1, 1.01], innerSpread: 0.12, hueShift: 0.022, innerGreen: 0.92 },
+} as const;
+function backgroundColorAdjustments(P: LiquidGlassParams) {
+  const w = bgWhiteness(P);
+  const b = BACKGROUND_COLOR_ADJUSTMENTS.black;
+  const white = BACKGROUND_COLOR_ADJUSTMENTS.white;
+  const mix = (black: number, light: number) => black + (light - black) * w;
+  return {
+    saturation: mix(b.saturation, white.saturation),
+    lighten: mix(b.lighten, white.lighten),
+    multiplyA: b.multiplyA.map((value, i) => mix(value, white.multiplyA[i])),
+    multiplyB: b.multiplyB.map((value, i) => mix(value, white.multiplyB[i])),
+    innerSpread: mix(b.innerSpread, white.innerSpread),
+    hueShift: mix(b.hueShift, white.hueShift),
+    innerGreen: mix(b.innerGreen, white.innerGreen),
+  };
+}
 // gradient(2色)/gradient3(3色) を「グラデーション経路」として共通に扱う（各 gate を集約）。
 // solid/blob は false ＝従来と完全に同じ経路を通る（バイト一致）。
 const isGradient = (P: LiquidGlassParams) => P.dotSource === "gradient" || P.dotSource === "gradient3";
@@ -203,7 +222,7 @@ const innerRgb = (P: LiquidGlassParams) => rgbOf((P.innerHide ? P.dotColor : P.d
 // 白背景の濃度均一化: 高i(=帯中心=各辺の濃い芯)ほど色を白へ寄せ、overlap で暗くなりすぎる
 // 飽和天井(≈255-luma)を下げて芯の突出を抑える。色/luma 領域の補償なので motion2 の shade
 // (alpha 再増幅)に相殺されない＝白地の主レバー。黒背景は bgWhiteness=0 で完全に無効。
-const CORE_LIFT_WHITE = 0.15; // 0=無効 … 白地で芯を白へ寄せる強度（推奨0.08–0.20。過大で芯が白抜け）
+const CORE_LIFT_WHITE = 0; // 白背景の色補正は applyDotAppearance の共通処理へ集約する。
 // 内側カラーの始点(gradStart): 内→外の補間が起きる半径窓 [w0,w1] そのものを動かす。
 // t を clamp((t-gs)/(1-gs)) のように「t空間」で切ると、smoothstep の傾きが非0の点で
 // プラトーが終わるため立ち上がりに折れ(C1不連続)が出て輪郭線状のリングに見え、さらに
@@ -221,7 +240,8 @@ const CORE_LIFT_WHITE = 0.15; // 0=無効 … 白地で芯を白へ寄せる強�
 const GRAD_WIN_MIN = 0.22; // 混色区間の最小幅。どの ringR/thickness でもハードエッジ化させない
 function gradWindow(P: LiquidGlassParams): [number, number] {
   const w0 = P.ringR - 0.28, w1 = P.ringR + 0.28;
-  const gs = isGradient(P) ? clamp(P.gradStart ?? 0, -0.6, 0.9) : 0; // solid/blob では無意味
+  const whiteSpread = backgroundColorAdjustments(P).innerSpread;
+  const gs = isGradient(P) ? clamp((P.gradStart ?? 0) + whiteSpread, -0.6, 0.9) : 0; // solid/blob では無意味
   if (gs === 0) return [w0, w1]; // 前段一致
   const half = P.thickness / 2;
   const near = half / 2, far = half + Math.max(0.02, P.fieldBlur);
@@ -336,7 +356,18 @@ function applyDotAppearance(col: number[], sr: number, P: LiquidGlassParams): nu
     const f = ib + (ob - ib) * radialT(sr, P);
     col = [clamp(col[0] * f, 0, 255), clamp(col[1] * f, 0, 255), clamp(col[2] * f, 0, 255)];
   }
-  return applyTone(col, P);
+  col = applyTone(col, P);
+  const white = bgWhiteness(P);
+  if (white <= 0) return col;
+  const adjustment = backgroundColorAdjustments(P);
+  const [h, s, l] = rgb2hsl(col);
+  const innerWeight = 1 - radialT(sr, P);
+  const shiftedHue = (h + adjustment.hueShift * innerWeight) % 1;
+  let adjusted = hsl2rgb(shiftedHue, s * adjustment.saturation, l + (1 - l) * adjustment.lighten);
+  adjusted = adjusted.map((value, i) => value * adjustment.multiplyA[i]);
+  adjusted = adjusted.map((value, i) => value * adjustment.multiplyB[i]);
+  adjusted[1] *= 1 - (1 - adjustment.innerGreen) * innerWeight;
+  return adjusted;
 }
 
 // 内側ドットの不透明度(innerAlpha)。穴側だけ alpha を落とし、外側へ向けて 1 へ戻す。
@@ -783,7 +814,7 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   toneBright: 1,
   toneTint: 0,
   toneTintColor: "#ffffff",
-  animA: 2,
+  animA: 1,
   animB: 0,
   motion: 5, // 既定＝グラデ反転波（2色が波紋状に入れ替わる／アクセントも同期してチカチカ切替）
   inflow: 1.25,
@@ -796,11 +827,11 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   seed: 77,
   wordmark: 1,
   wmSize: 0.75,
-  wmX: 0.66,
+  wmX: 0.625,
   wmY: 0.51,
   gfxX: 0.045,
   gfxY: 0,
-  intro: 1,
+  intro: 0,
   introPattern: 1,
   introOutlineMode: 1,
   introOutlineColor: "",
@@ -810,7 +841,7 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   introLetterScale: 1.1,
   introAccentSeconds: 4,
   introAccentStartOffset: -3.8,
-  transparent: 1,
+  transparent: 0,
   circles: [
     { col: "#4b3bf5", x: -0.09, y: -0.05, r: 0.4, a: 0.9, ring: 0.52, wob: 1.0 },
     { col: "#db0000", x: 0.11, y: 0.07, r: 0.34, a: 0.8, ring: 0.6, wob: 1.4 },
@@ -821,18 +852,25 @@ export const LIQUID_GLASS_DEFAULTS: LiquidGlassParams = {
   ],
 };
 
-// 6つのデフォルトカラーパターン。ドット(グラフィック)を単色化し、その色が
-// ワードマークのアクセント（「((」「))」）にも連動する（dotColor を共有）。
+// 最新SAVEのデフォルトをMAINとして先頭に固定し、15colors.pdfの外側→内側色を
+// サブカラーとして登録。白背景時の補正は全色へ同じプロファイルで適用される。
 export const LIQUID_GLASS_PRESETS: Partial<LiquidGlassParams>[] = [
-  { dotSource: "gradient", dotColor: "#4a44ff", dotColor2: "#23ecd8", bg: "#000000", zoom: 0.95, dotAlpha: 0.78 }, // ティール→ロイヤルブルー・黒背景（添付画像 上）
-  { dotSource: "gradient", dotColor: "#4a44ff", dotColor2: "#23ecd8", bg: "#ffffff", zoom: 0.95, dotAlpha: 0.72, toneSat: 1.25, toneBright: 0.95 }, // ティール→ロイヤルブルー・白背景（添付画像 下・色味調整で彩度/明るさ最適化）
-  { dotSource: "gradient", dotColor: "#6a2bff", dotColor2: "#17f0d9", bg: "#000000" }, // グラデ（Image #8/#12）
-  { dotSource: "solid", dotColor: "#6a2bff", bg: "#000000" }, // バイオレット
-  { dotSource: "solid", dotColor: "#ff2878", bg: "#000000" }, // ピンク（添付画像）
-  { dotSource: "solid", dotColor: "#ff4a17", bg: "#000000" }, // オレンジ
-  { dotSource: "solid", dotColor: "#aadc00", bg: "#000000" }, // ライム
-  { dotSource: "solid", dotColor: "#12e3c6", bg: "#000000" }, // ティール
-  { dotSource: "solid", dotColor: "#3c5aff", bg: "#000000" }, // ブルー（添付画像）
+  { ...LIQUID_GLASS_DEFAULTS },
+  { dotSource: "gradient", dotColor: "#ffb7c5", dotColor2: "#883a55", bg: "#000000" }, // Comfort
+  { dotSource: "gradient", dotColor: "#2563eb", dotColor2: "#080b68", bg: "#000000" }, // Focus
+  { dotSource: "gradient", dotColor: "#ff7a00", dotColor2: "#8a120a", bg: "#000000" }, // Social
+  { dotSource: "gradient", dotColor: "#00d4c6", dotColor2: "#1a3e65", bg: "#000000" }, // Calm
+  { dotSource: "gradient", dotColor: "#e60033", dotColor2: "#f4c3c3", bg: "#000000" }, // Excitement
+  { dotSource: "gradient", dotColor: "#009944", dotColor2: "#16596a", bg: "#000000" }, // Nature
+  { dotSource: "gradient", dotColor: "#4a90c2", dotColor2: "#0a2c70", bg: "#000000" }, // Openness
+  { dotSource: "gradient", dotColor: "#dddc61", dotColor2: "#856938", bg: "#000000" }, // Inclusiveness
+  { dotSource: "gradient", dotColor: "#7ed321", dotColor2: "#00573d", bg: "#000000" }, // Flexibility
+  { dotSource: "gradient", dotColor: "#00b3a4", dotColor2: "#004d05", bg: "#000000" }, // Exploration
+  { dotSource: "gradient", dotColor: "#0f4c81", dotColor2: "#a4c5e5", bg: "#000000" }, // Unity
+  { dotSource: "gradient", dotColor: "#ff6fae", dotColor2: "#fb9393", bg: "#000000" }, // Familiarity
+  { dotSource: "gradient", dotColor: "#8b1e3f", dotColor2: "#e493fb", bg: "#000000" }, // Identity
+  { dotSource: "gradient", dotColor: "#d4a017", dotColor2: "#8eaf31", bg: "#000000" }, // Dignity
+  { dotSource: "gradient", dotColor: "#b000b9", dotColor2: "#b54d08", bg: "#000000" }, // Vision
 ];
 
 // controls: HEX HALO と共通の並び（表示→中央の六角形→フォルム→色→モーション→背景）に
