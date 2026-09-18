@@ -1,13 +1,13 @@
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
 import { pickCodec, encodeDimensions } from "@/lib/media/h264";
-import { MovPngWriter, addCanvasFrameToMov } from "@/lib/media/movMuxer";
-import { isPngEncoderSupported } from "@/lib/media/png";
+import { MovWriter, MOV_CODEC_PRORES_4444, addCanvasFrameToMov } from "@/lib/media/movMuxer";
+import { ProRes4444Encoder } from "@/lib/media/prores";
 
 // canvas コンテンツ(05/07)の書き出し。WebCodecs+mp4-muxer で決定論的に H.264/MP4 化
 // （phase を固定ステップで進め frameCount 枚を正確にエンコード）。WebCodecs 非対応時は
 // MediaRecorder にフォールバック（実時間キャプチャ・WebMになる場合あり）。
 //
-// 背景透過が必要なときは "mov"（QuickTime PNG）を選ぶ。H.264 も VP9(WebCodecs) も
+// 背景透過が必要なときは "mov"（Apple ProRes 4444）を選ぶ。H.264 も VP9(WebCodecs) も
 // アルファを保持できないため、MP4 では透過を出力できない。
 
 export type FramePainter = (
@@ -51,18 +51,18 @@ export async function exportCanvasVideo(opts: {
   // 動画の先頭に一度だけ再生する導入（出現）アニメ。省略時は従来どおりループのみ。
   introSeconds?: number;
   paintIntro?: IntroPainter;
-  // "mov" は背景透過（QuickTime PNG / ロスレス）。既定は従来どおり "mp4"。
+  // "mov" は背景透過（Apple ProRes 4444）。既定は従来どおり "mp4"。
   format?: VideoFormat;
 }): Promise<void> {
   const { paint, width, height, fps, loopSeconds, bitrateMbps, name, onProgress } = opts;
   const format = opts.format ?? "mp4";
   const introSeconds = opts.paintIntro && opts.introSeconds ? opts.introSeconds : 0;
   const paintIntro = opts.paintIntro;
-  // MP4 は H.264 の制約（Level 4.0 / 偶数寸法）に合わせて丸めるが、MOV(PNG) は
-  // コーデック側の制約がないので指定サイズをそのまま使う。
+  // MP4 は H.264 の制約（Level 4.0 / 偶数寸法）に合わせて丸める。ProRes は解像度の
+  // 上限がないので指定サイズのまま（幅だけは偶数である必要がある）。
   const { sw, sh } =
     format === "mov"
-      ? { sw: Math.max(1, Math.round(width)), sh: Math.max(1, Math.round(height)) }
+      ? { sw: Math.max(16, Math.round(width / 2) * 2), sh: Math.max(16, Math.round(height)) }
       : encodeDimensions(width, height);
   const canvas = document.createElement("canvas");
   canvas.width = sw;
@@ -90,22 +90,18 @@ export async function exportCanvasVideo(opts: {
   };
   const bitrate = Math.min(40_000_000, Math.max(1_000_000, Math.round(bitrateMbps * 1_000_000)));
 
-  // --- MOV: 背景透過（QuickTime PNG / 全フレームがロスレスのキーフレーム） ---
+  // --- MOV: 背景透過（Apple ProRes 4444 / 全フレームがキーフレーム） ---
   if (format === "mov") {
-    if (!isPngEncoderSupported()) {
-      throw new Error(
-        "この環境は透過MOVの書き出しに未対応です（CompressionStream が利用できません）。",
-      );
-    }
-    const writer = new MovPngWriter({ width: sw, height: sh, fps });
+    const encoder = new ProRes4444Encoder(sw, sh);
+    const writer = new MovWriter({ width: sw, height: sh, fps, codec: MOV_CODEC_PRORES_4444 });
     for (let i = 0; i < frameCount; i++) {
       // 透過を残すため、毎フレーム完全にクリアしてから描く（レンダラ側が
       // 背景を塗らない設定＝transparent のときだけ透過が残る）。
       ctx.clearRect(0, 0, sw, sh);
       paintFrame(i);
-      await addCanvasFrameToMov(writer, ctx, sw, sh);
+      addCanvasFrameToMov(writer, encoder, ctx, sw, sh);
       onProgress?.(i + 1, frameCount, writer.byteLength);
-      if (i % 4 === 3) await new Promise((r) => setTimeout(r, 0)); // UIを止めない
+      await new Promise((r) => setTimeout(r, 0)); // UIを止めない
     }
     downloadBlob(writer.finalize(), name, "mov");
     return;

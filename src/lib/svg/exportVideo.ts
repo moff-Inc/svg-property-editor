@@ -1,8 +1,8 @@
 import DOMPurify from "dompurify";
 import { Muxer, ArrayBufferTarget } from "mp4-muxer";
 import { pickCodec, encodeDimensions } from "@/lib/media/h264";
-import { MovPngWriter, addCanvasFrameToMov } from "@/lib/media/movMuxer";
-import { isPngEncoderSupported } from "@/lib/media/png";
+import { MovWriter, MOV_CODEC_PRORES_4444, addCanvasFrameToMov } from "@/lib/media/movMuxer";
+import { ProRes4444Encoder } from "@/lib/media/prores";
 import { applyEdits } from "./apply";
 import { ANIMATION_KEYFRAMES } from "./animations";
 import type { EditsMap } from "./types";
@@ -21,7 +21,7 @@ const DEFAULT_DURATION_SEC = 2; // アニメ未指定時のクリップ長 / app
 // bytes は MOV のように書き出し途中でサイズが読める形式でのみ渡す。
 export type VideoProgress = (done: number, total: number, bytes?: number) => void;
 
-// "mov" は背景透過（QuickTime PNG / ロスレス）。H.264 はアルファを保持できない。
+// "mov" は背景透過（Apple ProRes 4444）。H.264 はアルファを保持できない。
 export type SvgVideoFormat = "mp4" | "mov";
 
 interface Box {
@@ -132,13 +132,7 @@ export async function exportSvgVideo(opts: {
   const { baseSvg, edits, name, fps = 30, onProgress } = opts;
   const format = opts.format ?? "mp4";
 
-  if (format === "mov") {
-    if (!isPngEncoderSupported()) {
-      throw new Error(
-        "このブラウザは透過MOVの書き出しに未対応です（CompressionStream が利用できません）。",
-      );
-    }
-  } else if (typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined") {
+  if (format !== "mov" && (typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined")) {
     throw new Error(
       "このブラウザは WebCodecs (VideoEncoder) に未対応です。Chrome / Edge / Safari 16.4+ でお試しください。",
     );
@@ -239,11 +233,12 @@ export async function exportSvgVideo(opts: {
     // 出力解像度は元の viewBox 比から決定（アスペクト比を維持しているため不変）
     const { sw, sh } = encodeDimensions(w, h);
 
-    // MOV は PNG をそのまま格納するのでエンコーダを持たない
     let muxer: Muxer<ArrayBufferTarget> | null = null;
     let encoder: VideoEncoder | null = null;
     let encodeError: unknown = null;
-    const movWriter = format === "mov" ? new MovPngWriter({ width: sw, height: sh, fps }) : null;
+    const movWriter =
+      format === "mov" ? new MovWriter({ width: sw, height: sh, fps, codec: MOV_CODEC_PRORES_4444 }) : null;
+    const proresEncoder = format === "mov" ? new ProRes4444Encoder(sw, sh) : null;
 
     if (format === "mp4") {
       const codec = await pickCodec(sw, sh, fps);
@@ -341,8 +336,8 @@ export async function exportSvgVideo(opts: {
       }
       ctx.drawImage(img, 0, 0, sw, sh);
 
-      if (movWriter) {
-        await addCanvasFrameToMov(movWriter, ctx, sw, sh);
+      if (movWriter && proresEncoder) {
+        addCanvasFrameToMov(movWriter, proresEncoder, ctx, sw, sh);
         onProgress?.(i + 1, frameCount, movWriter.byteLength);
       } else if (encoder) {
         const frame = new VideoFrame(canvas, {

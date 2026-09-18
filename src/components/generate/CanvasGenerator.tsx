@@ -26,13 +26,15 @@ const EXPORT_H = 720;
 
 const FORMATS: { value: VideoFormat; label: string; ext: string }[] = [
   { value: "mp4", label: "MP4 / H.264", ext: "mp4" },
-  { value: "mov", label: "MOV / 背景透過", ext: "mov" },
+  { value: "mov", label: "MOV / 透過 ProRes", ext: "mov" },
 ];
 
 const mib = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 
-// MOV(ロスレス)のサイズ目安。1280x720 の LIQUID GLASS 実測が 1フレーム 0.2〜0.4MB。
-const MOV_MB_PER_FRAME = 0.3;
+// 透過MOV(ProRes 4444)の目安。1280x720 の実測で 1フレーム約0.45MB / 書き出し約50ms。
+// ProRes はスライス単位のレート制御があるので、最悪でも 1フレーム 0.9MB 程度に収まる。
+const MOV_MB_PER_FRAME = 0.45;
+const MOV_SEC_PER_FRAME = 0.05;
 
 // スライダー進捗（--fill）。
 function fill(num: number, min: number, max: number): CSSProperties {
@@ -598,11 +600,11 @@ function CanvasGeneratorInner({ slug, initial }: { slug: string; initial?: GenIn
               </div>
             ) : (
               <p className="gen-format-note">
-                MOVは背景を透過させ、QuickTime PNG（ロスレス）で {loopSeconds * fps} フレームを
+                MOVは背景を透過させ、Apple ProRes 4444 で {loopSeconds * fps} フレームを
                 書き出します（目安 約{Math.round((loopSeconds * fps * MOV_MB_PER_FRAME) / 5) * 5}MB・
-                書き出しに約{Math.max(1, Math.round((loopSeconds * fps * 0.07) / 5) * 5)}秒）。
-                After Effects / Premiere Pro / Final Cut / DaVinci でアルファ付きのまま
-                読み込めます。重い場合はループ長と FPS を下げてください。
+                書き出しに約{Math.max(1, Math.round((loopSeconds * fps * MOV_SEC_PER_FRAME) / 5) * 5)}秒）。
+                QuickTime Player / After Effects / Premiere Pro / Final Cut / DaVinci で
+                アルファ付きのまま開けます。重い場合はループ長と FPS を下げてください。
               </p>
             )}
           </div>

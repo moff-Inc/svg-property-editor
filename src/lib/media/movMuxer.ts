@@ -1,18 +1,17 @@
-// QuickTime(.mov) マクサ。各サンプルを PNG 画像そのものとして格納する
-// 「QuickTime PNG」トラック（fourcc 'png ' / depth 32）を書き出す。
+// QuickTime(.mov) マクサ。アルファ付き映像を編集ソフトへ渡すためのコンテナを組む。
 //
 // なぜ自前で書くのか:
 //   ブラウザの VideoEncoder(WebCodecs) は H.264/VP9 いずれもアルファを保持できず、
-//   mp4-muxer も ISO BMFF/映像コーデック前提。背景透過の動画を編集ソフト
+//   mp4-muxer も ISO BMFF/映像コーデック前提。背景透過の動画を
 //   (After Effects / Premiere / Final Cut / DaVinci / QuickTime) へ渡すには、
-//   ロスレス RGBA を運べるコンテナを自前で組む必要がある。
-//   PNG in MOV は追加依存ゼロ・完全ロスレス・上記すべてでデコードできる。
+//   アルファを運べるコンテナを自前で組む必要がある。
 //
-// 構造（ffmpeg の `-c:v png -f mov` 出力に合わせてある）:
-//   ftyp('qt  ') / wide / mdat(PNGを連結) / moov > trak > mdia > minf > stbl
+// 構造（ffmpeg の `-f mov` 出力に合わせてある）:
+//   ftyp('qt  ') / wide / mdat(サンプルを連結) / moov > trak > mdia > minf > stbl
 // 全サンプルがキーフレームなので stss は書かない（= 全同期サンプル扱い）。
+// コーデックは fourcc と compressorname だけの差なので MovCodec で差し替える。
 
-import { encodeRgbaPng } from "./png";
+import { ProRes4444Encoder } from "./prores";
 
 const MOVIE_TIMESCALE = 1000;
 const FRAME_UNITS = 1000; // 1フレーム当たりのメディア時間単位（timescale = fps * これ）
@@ -98,10 +97,10 @@ function qtHdlr(componentType: string, subtype: string, name: string): Uint8Arra
   );
 }
 
-// 'png ' の VisualSampleEntry。depth=32 が「アルファあり」の signal。
-function pngSampleEntry(width: number, height: number): Uint8Array {
+// 映像の VisualSampleEntry。depth=32 が「アルファあり」の signal。
+function visualSampleEntry(codec: MovCodec, width: number, height: number): Uint8Array {
   return box(
-    "png ",
+    codec.fourcc,
     zeros(6), // reserved
     u16(1), // data_reference_index
     u16(0), // version
@@ -115,23 +114,35 @@ function pngSampleEntry(width: number, height: number): Uint8Array {
     u32(0x00480000), // vertical resolution 72dpi
     u32(0), // data size
     u16(1), // frame count
-    compressorName("QuickTime PNG"),
+    compressorName(codec.name),
     u16(32), // depth: 32 = RGBA（アルファチャンネルあり）
     u16(0xffff), // color table id: -1 = なし
     box("pasp", u32(1), u32(1)), // 正方ピクセル
   );
 }
 
-export interface MovPngMovieOptions {
+// 格納するコーデック。fourcc は4文字、name は stsd の compressorname に入る表示名。
+export interface MovCodec {
+  fourcc: string;
+  name: string;
+}
+
+// Apple ProRes 4444。QuickTime / Final Cut / After Effects / Premiere / DaVinci が
+// アルファ付きでデコードできる。QuickTime PNG と Animation(RLE) は macOS の
+// AVFoundation が既にデコードを落としているため使わない。
+export const MOV_CODEC_PRORES_4444: MovCodec = { fourcc: "ap4h", name: "Apple ProRes 4444" };
+
+export interface MovMovieOptions {
   width: number;
   height: number;
   fps: number;
+  codec: MovCodec;
 }
 
-// PNG フレーム列 → .mov の Blob。frames は 1フレーム=1PNG。
-export function buildQuickTimePngMovie(
+// 符号化済みフレーム列 → .mov の Blob。frames は 1フレーム=1サンプル。
+export function buildQuickTimeMovie(
   frames: readonly Blob[],
-  { width, height, fps }: MovPngMovieOptions,
+  { width, height, fps, codec }: MovMovieOptions,
 ): Blob {
   if (frames.length === 0) throw new Error("フレームが1枚もありません");
 
@@ -156,7 +167,7 @@ export function buildQuickTimePngMovie(
   const sizes: Uint8Array[] = frames.map((f) => u32(f.size));
   const stbl = box(
     "stbl",
-    fullBox("stsd", 0, 0, u32(1), pngSampleEntry(width, height)),
+    fullBox("stsd", 0, 0, u32(1), visualSampleEntry(codec, width, height)),
     fullBox("stts", 0, 0, u32(1), u32(frames.length), u32(FRAME_UNITS)),
     // 全サンプルを1チャンクに収める（mdat は連続領域なので分割の必要がない）
     fullBox("stsc", 0, 0, u32(1), u32(1), u32(frames.length), u32(1)),
@@ -231,19 +242,19 @@ export function buildQuickTimePngMovie(
   });
 }
 
-// フレームを逐次受け取って .mov にまとめる。PNG は受け取った時点で Blob 化するので、
+// フレームを逐次受け取って .mov にまとめる。受け取った時点で Blob 化するので、
 // 長尺でも実データはブラウザ側（必要ならディスク）に置かれ JS ヒープを圧迫しない。
-export class MovPngWriter {
+export class MovWriter {
   private readonly frames: Blob[] = [];
-  private readonly options: MovPngMovieOptions;
+  private readonly options: MovMovieOptions;
   private bytes = 0;
 
-  constructor(options: MovPngMovieOptions) {
+  constructor(options: MovMovieOptions) {
     this.options = options;
   }
 
-  addFrame(png: Uint8Array | Blob): void {
-    const blob = png instanceof Blob ? png : new Blob([png as BlobPart], { type: "image/png" });
+  addFrame(sample: Uint8Array | Blob): void {
+    const blob = sample instanceof Blob ? sample : new Blob([sample as BlobPart]);
     this.frames.push(blob);
     this.bytes += blob.size;
   }
@@ -252,24 +263,25 @@ export class MovPngWriter {
     return this.frames.length;
   }
 
-  // ここまでに積んだ PNG の合計バイト数（進捗表示の目安に使う）
+  // ここまでに積んだサンプルの合計バイト数（進捗表示の目安に使う）
   get byteLength(): number {
     return this.bytes;
   }
 
   finalize(): Blob {
-    return buildQuickTimePngMovie(this.frames, this.options);
+    return buildQuickTimeMovie(this.frames, this.options);
   }
 }
 
 // canvas の現在の内容を1フレームとして追加する。getImageData はストレートアルファを
 // 返すので、透過（clearRect のまま残した領域）がそのまま MOV のアルファになる。
-export async function addCanvasFrameToMov(
-  writer: MovPngWriter,
+export function addCanvasFrameToMov(
+  writer: MovWriter,
+  encoder: ProRes4444Encoder,
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-): Promise<void> {
+): void {
   const { data } = ctx.getImageData(0, 0, width, height);
-  writer.addFrame(await encodeRgbaPng(data, width, height));
+  writer.addFrame(encoder.encodeFrame(data));
 }

@@ -137,7 +137,7 @@ export default function EditorClient({
             onChange={(e) => setVideoFormat(e.target.value as SvgVideoFormat)}
             disabled={videoPct !== null}
             aria-label="動画の書き出し形式"
-            title="MOVはSVGの透明部分を残したまま書き出します（QuickTime PNG / ロスレス）"
+            title="MOVはSVGの透明部分を残したまま書き出します（Apple ProRes 4444）"
           >
             <option value="mp4">MP4</option>
             <option value="mov">MOV / 透過</option>
