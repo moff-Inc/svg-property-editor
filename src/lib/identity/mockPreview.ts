@@ -32,8 +32,8 @@ const MOODS: Record<Mood, { label: string; heading: string; score: number; chang
 };
 
 export const MOCK_PREVIEW_DEFAULTS: Params = {
-  mockTheme: "compare", mockMood: "balanced", mockScale: 1, mockWidthScale: 1, mockHeightScale: 1,
-  mockOffsetX: 0, mockOffsetY: 0, mockLabelOffsetY: 0, energy: 78, calm: 92, focus: 86,
+  mockTheme: "compare", mockMood: "balanced", mockScale: 1, mockWidthScale: 0.91, mockHeightScale: 0.94,
+  mockOffsetX: 0, mockOffsetY: 0.05, mockLabelOffsetY: 0, energy: 78, calm: 92, focus: 86,
   variation: 2, bg: "#e9eaee",
 };
 
