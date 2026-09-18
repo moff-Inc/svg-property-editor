@@ -13,13 +13,13 @@ const sourceDir = new URL('../src/lib/identity/', import.meta.url).pathname;
 const source = await readFile(new URL('liquidGlass.ts', `file://${sourceDir}`), 'utf8');
 const bundle = await build({
   stdin: {
-    contents: source + '\nexport { lockupLayout };',
+    contents: source + '\nexport { lockupLayout, introCenterLayout };',
     resolveDir: sourceDir,
     loader: 'ts',
   },
   bundle: true, write: false, platform: 'node', format: 'esm',
 });
-const { lockupLayout, LIQUID_GLASS_DEFAULTS: D, LIQUID_GLASS_CONTROLS } = await import(
+const { lockupLayout, introCenterLayout, LIQUID_GLASS_DEFAULTS: D, LIQUID_GLASS_CONTROLS } = await import(
   `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`
 );
 
@@ -65,16 +65,38 @@ for (const [gfxX, gfxY] of [[0.3, 0.2], [-0.5, -0.4]]) {
   assert.equal(moved.D, base.D, 'グラフィックの一辺は不変（位置だけが動く）');
 }
 
-// ── 導入アニメの移動量は不変 ──
+// ── 導入アニメの開始位置は必ずキャンバス中央（位置調整の影響を受けない）──
+// 導入は「中央で出現 → 中央で消失 → 現在の配置へ移動」という演出なので、
+// 開始位置までずれると「中央から出る」意図が崩れる。
+{
+  const C = (p) => introCenterLayout(W, H, { ...D, ...p });
+  const center = C({});
+  // ずらしが 0 のときは、ワードマーク非表示時の通常レイアウトと完全に一致
+  assert.deepEqual(center, L({}, false), '中央レイアウト = ロゴOFFの通常レイアウト（ずらし0）');
+  assert.deepEqual([center.gx, center.gy], [280, 0], '中央レイアウトの座標');
+  for (const p of [{ gfxX: 0.35 }, { gfxY: -0.35 }, { gfxX: -0.2, gfxY: 0.3 }, { gfxX: 0.1, gfxY: 0.1 }]) {
+    assert.deepEqual(C(p), center, `導入の中央がずれている: ${JSON.stringify(p)}`);
+  }
+  // 一方で最終配置（通常レイアウト）はちゃんと動く＝パラメータが効いている
+  for (const showWord of [true, false]) {
+    const moved = L({ gfxX: 0.1, gfxY: 0.1 }, showWord);
+    const base = L({}, showWord);
+    assert.notDeepEqual([moved.gx, moved.gy], [base.gx, base.gy], '最終配置は動く');
+  }
+}
+
+// ── 導入アニメの移動量 ──
 // 導入は「中央レイアウト Lc → 通常レイアウト L」の差でグラフィックを動かす。
 // オフセットは両方へ同じだけ乗るので、差（= 移動距離）は変わってはいけない。
+// 中央から最終配置までの移動距離は、ずらしたぶんだけ素直に増減する。
 {
-  const travel = (p) => L(p, true).gx - L(p, false).gx;
-  const base = travel({});
-  for (const p of [{ gfxX: 0.2 }, { gfxX: -0.45, gfxY: 0.3 }, { gfxY: -0.5 }]) {
-    assert.equal(travel(p), base, `導入の移動量が変わっている: ${JSON.stringify(p)}`);
-  }
-  assert.equal(base, -384, '導入の移動量（W*0.2 - W/2 = -384px）');
+  const travel = (p) => {
+    const l = L(p, true), c = introCenterLayout(W, H, { ...D, ...p });
+    return [l.gx - c.gx, l.gy - c.gy];
+  };
+  assert.deepEqual(travel({}), [-384, 0], '既定の移動量（W*0.2 - W/2 = -384px）');
+  assert.deepEqual(travel({ gfxX: 0.1 }), [-384 + 128, 0], '横へずらすと移動量もその分ずれる');
+  assert.deepEqual(travel({ gfxY: -0.25 }), [-384, -180], '縦へずらすと縦の移動量が生まれる');
 }
 
 // ── コントロール定義と既定値が噛み合っていること ──
@@ -102,4 +124,4 @@ for (const [gfxX, gfxY] of [[0.3, 0.2], [-0.5, -0.4]]) {
   }
 }
 
-console.log('グラフィック位置OK: 既定は従来と同一 / ずれ量は正確 / ロゴと導入アニメに影響なし');
+console.log('グラフィック位置OK: 既定は従来と同一 / ずれ量は正確 / ロゴと導入の開始位置(中央)に影響なし');

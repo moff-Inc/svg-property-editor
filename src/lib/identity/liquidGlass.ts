@@ -1141,6 +1141,14 @@ function lockupLayout(W: number, H: number, showWord: boolean, P: LiquidGlassPar
   return { D, gx, gy, wx: Math.round(cx - wmW / 2), wy: Math.round(cy - wmH / 2), wmScale };
 }
 
+// 導入アニメの「中央」配置。グラフィック位置(gfxX/gfxY)の影響を受けず、必ずキャンバス
+// 中央になる。導入は中央での出現→消失から始まり、そこから現在の配置へ移動する演出
+// なので、開始位置までずれると「中央から出る」という意図が崩れるため分けている。
+// ずらしが 0 のときは、ワードマーク非表示時の通常レイアウトと完全に同一。
+function introCenterLayout(W: number, H: number, P: LiquidGlassParams) {
+  return lockupLayout(W, H, false, { ...P, gfxX: 0, gfxY: 0 });
+}
+
 // ── 導入（出現）アニメ「テーマ1: 中心で集合→左で確定」──────────────────
 // 各区間の長さ（秒）。合計＝導入尺。
 // 構成: A 中心で出現（モード5・逆回転・3周で一粒ずつポポポ）
@@ -1361,7 +1369,7 @@ function drawWordmarkParticles(
   const { list, x0, x1 } = wordmarkParticles(W, H, L, P, ink, accent, cache);
   const cloud = dotField(introParticleParams(P), phase);
   if (!cloud.length) return;
-  const Lc = lockupLayout(W, H, false, P);
+  const Lc = introCenterLayout(W, H, P);
   const unit = Lc.D * 0.395 * P.zoom * P.fieldScale;
   const cloudX = Lc.gx + Lc.D / 2;
   const cloudY = Lc.gy + Lc.D / 2;
@@ -1531,7 +1539,7 @@ function renderLiquidGlassIntro(
   // 中央 H×H オフスクリーンへ描いて合成（カル/クリップが drawC3 と一致＝A末端が
   // 初期登場用drawC3と厳密一致＝B開始と連続）。
   if (t < bA) {
-    const Lc = lockupLayout(W, H, false, P);
+    const Lc = introCenterLayout(W, H, P);
     const g = cache.get("introGfx", Lc.D, Lc.D);
     g.x.setTransform(1, 0, 0, 1, 0, 0);
     g.x.clearRect(0, 0, Lc.D, Lc.D);
@@ -1549,7 +1557,7 @@ function renderLiquidGlassIntro(
       const progress = clamp((elapsed - INTRO_A) / INTRO_B, 0, 1);
       const morph = smoother(progress);
       const morphP = { ...P, dotAspect: P.dotAspect + (1 - P.dotAspect) * morph };
-      const Lc = lockupLayout(W, H, false, P);
+      const Lc = introCenterLayout(W, H, P);
       const g = cache.get("introGfx", Lc.D, Lc.D);
       drawC3(g.x, Lc.D, Lc.D, phase, { ...morphP, transparent: 1 }, cache, {
         progress,
@@ -1566,7 +1574,7 @@ function renderLiquidGlassIntro(
     if (elapsed < timing.wordEnd) {
       // 変形済みの中央粒子場を薄くしながら、同じ場を出発点に文字粒子を組み上げる。
       const particleP = { ...P, dotAspect: 1 };
-      const Lc = lockupLayout(W, H, false, P);
+      const Lc = introCenterLayout(W, H, P);
       const g = cache.get("introGfx", Lc.D, Lc.D);
       drawC3(g.x, Lc.D, Lc.D, phase, { ...particleP, transparent: 1 }, cache, {
         progress: 1,
@@ -1610,20 +1618,22 @@ function renderLiquidGlassIntro(
   if (isFlowPattern && !showWord && t < bC) {
     const progress = (t - bA) / (bC - bA);
     const move = smoother(progress);
-    const Lc = lockupLayout(W, H, false, P);
+    const Lc = introCenterLayout(W, H, P);
+    // 中央 → 現在の配置へ。縦も補間する（gfxY=0 なら Lc.gy === L.gy で従来と同一）。
     const gx = Lc.gx + (L.gx - Lc.gx) * move;
+    const gy = Lc.gy + (L.gy - Lc.gy) * move;
     const g = cache.get("introGfx", L.D, L.D);
     const unit = L.D * 0.395 * P.zoom * P.fieldScale;
     drawC3(g.x, L.D, L.D, phase, { ...P, transparent: 1 }, cache, {
       progress, travel: (L.gx - Lc.gx) / Math.max(0.001, unit),
     });
-    c.drawImage(g.c, gx, L.gy);
+    c.drawImage(g.c, gx, gy);
     return;
   }
   // B: 消失（中央・初期登場用motion5を動かしながらフェードアウト）
   if (t < bB) {
     const tB = (t - bA) / (bB - bA);
-    const Lc = lockupLayout(W, H, false, P);
+    const Lc = introCenterLayout(W, H, P);
     const g = cache.get("introGfx", Lc.D, Lc.D);
     drawC3(g.x, Lc.D, Lc.D, graphicPhase, { ...introGraphicParams(P), transparent: 1 }, cache);
     c.globalAlpha = 1 - smoothstep(0, 1, tB);
